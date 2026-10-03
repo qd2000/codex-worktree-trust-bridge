@@ -5,28 +5,32 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 Codex Worktree Trust Bridge is a small, portable Windows helper that removes the
-repetitive **“Trust this folder?”** step when Codex Desktop opens trusted Git
-repositories and registered Git worktrees.
+repetitive **“Trust this folder?”** step when Codex Desktop opens project
+directories. It supports both guarded Git/worktree-only approval and an explicit
+opt-in mode for ordinary directories beneath trusted project roots.
 
 It is an independent community utility. It is not an OpenAI product and is not
 affiliated with or endorsed by OpenAI.
 
 ## Why this exists
 
-Codex Desktop stores trust for individual project paths. A workflow that creates
-many Git worktrees can therefore produce many trust prompts, even when all of the
-worktrees belong to repositories under project roots that you already control.
+Codex Desktop stores trust for individual project paths. Workflows that create
+many Git worktrees, temporary experiment directories, generated documentation
+folders, or other short-lived project roots can therefore produce many trust
+prompts, even when every path lives beneath project roots that you already
+control.
 
 The bridge combines two mechanisms in one background process and one Windows
 Scheduled Task:
 
 1. it maintains exact `projects.'<path>'.trust_level = "trusted"` entries in
    `%USERPROFILE%\.codex\config.toml`; and
-2. it uses Windows UI Automation to approve the matching Codex Desktop trust
-   dialog.
+2. it uses Windows UI Automation to invoke the matching Codex Desktop Trust or
+   Cancel button.
 
-The bridge does **not** click fixed screen coordinates. Before invoking the trust
-button, it verifies that the displayed path:
+The bridge does **not** click fixed screen coordinates.
+
+In the default `git-only` mode, approval requires that the displayed path:
 
 - is an absolute, existing directory;
 - is inside an explicitly configured allowed root;
@@ -34,7 +38,12 @@ button, it verifies that the displayed path:
   `git worktree list --porcelain`; and
 - has an exact trusted entry maintained by the bridge.
 
-Anything that does not satisfy all checks is refused and logged.
+In `all-directories` mode, an existing non-reparse directory beneath an allowed
+root may also be approved on demand. Paths outside the allowlist, missing paths,
+reparse points, or paths that otherwise fail policy are refused. The bridge can
+either leave a denied prompt open or automatically invoke the verified Cancel
+button after a configurable grace period, preventing one modal from blocking
+later prompts.
 
 ## Requirements
 
@@ -45,7 +54,7 @@ Anything that does not satisfy all checks is refused and logged.
 - an interactive, signed-in Windows session for the same user who runs Codex
 
 The UI automation part cannot operate while the user is fully signed out because
-there is no interactive desktop in which to inspect or approve a dialog.
+there is no interactive desktop in which to inspect or act on a dialog.
 
 ## Quick start
 
@@ -55,22 +64,35 @@ Clone or download the repository, then run:
 .\Install.cmd
 ```
 
-The default allowed roots are:
+The public defaults are conservative:
 
 ```text
-C:\PROJECT
-E:\PROJECT
+Allowed roots:             C:\PROJECT, E:\PROJECT
+Trust mode:                git-only
+Denied dialog action:      leave-open
+Denied dialog grace:       3 seconds
 ```
 
-To install with different roots, run the PowerShell installer directly:
+To install with different roots:
 
 ```powershell
 .\Install.cmd -AllowedRoots C:\PROJECT,D:\PROJECT
 ```
 
+To approve every existing ordinary directory beneath the allowed roots and
+automatically cancel denied prompts:
+
+```powershell
+.\Install.cmd `
+  -AllowedRoots C:\PROJECT,D:\PROJECT `
+  -TrustMode all-directories `
+  -DeniedDialogAction cancel `
+  -DeniedDialogGraceSeconds 3
+```
+
 The installer is idempotent. Running it again upgrades the installed runtime,
 rewrites the bridge configuration, recreates the Scheduled Task, and starts a
-fresh bridge process. If you use non-default roots, pass them again during an
+fresh bridge process. Pass custom roots and policy options again during an
 upgrade because the installer regenerates the JSON configuration from its
 arguments.
 
@@ -115,7 +137,7 @@ Example:
 {
   "schema": "codex-worktree-trust-bridge.config",
   "version": 1,
-  "packageVersion": "0.1.0",
+  "packageVersion": "0.2.0",
   "allowedRoots": [
     "C:\\PROJECT",
     "E:\\PROJECT"
@@ -123,6 +145,9 @@ Example:
   "uiPollIntervalMs": 750,
   "reconcileIntervalSeconds": 60,
   "discoveryDepth": 4,
+  "trustMode": "git-only",
+  "deniedDialogAction": "leave-open",
+  "deniedDialogGraceSeconds": 3,
   "enableConfigTrust": true,
   "enableUiAutoApprove": true,
   "pruneMissingManagedEntries": true
@@ -131,13 +156,16 @@ Example:
 
 | Setting | Purpose |
 | --- | --- |
-| `allowedRoots` | Project trees in which registered Git roots and worktrees may be trusted. Use the narrowest practical roots. |
+| `allowedRoots` | Project trees inside which paths may be approved. Use the narrowest practical roots. |
+| `trustMode` | `git-only` approves only registered Git roots/worktrees. `all-directories` also approves ordinary existing directories beneath allowed roots. |
+| `deniedDialogAction` | `leave-open` logs a refusal and leaves the modal for a human. `cancel` invokes the verified Cancel button after the grace period. |
+| `deniedDialogGraceSeconds` | Delay before a refused prompt is cancelled, allowing transient Git/worktree creation to settle. |
 | `uiPollIntervalMs` | How often the interactive process checks for a matching Codex trust dialog. |
 | `reconcileIntervalSeconds` | How often Git roots/worktrees and the managed trust block are reconciled. |
 | `discoveryDepth` | Maximum directory depth used while finding Git repositories under allowed roots. |
 | `enableConfigTrust` | Enables maintenance of exact trusted entries in `config.toml`. |
-| `enableUiAutoApprove` | Enables guarded Windows UI Automation approval. |
-| `pruneMissingManagedEntries` | Removes bridge-managed entries when their Git roots/worktrees disappear. |
+| `enableUiAutoApprove` | Enables guarded Windows UI Automation approval and cancellation. |
+| `pruneMissingManagedEntries` | Compatibility field retained for existing configurations. In v0.2.0, missing, invalid, out-of-policy, and mode-ineligible managed paths are always removed for safety. |
 
 Restart the Scheduled Task after manually editing the JSON configuration:
 
@@ -145,6 +173,34 @@ Restart the Scheduled Task after manually editing the JSON configuration:
 Stop-ScheduledTask -TaskName 'Codex-Worktree-Trust-Bridge'
 Start-ScheduledTask -TaskName 'Codex-Worktree-Trust-Bridge'
 ```
+
+## Trust modes
+
+### `git-only`
+
+This is the public default. The exact folder shown by Codex must be the root of a
+Git repository or a registered worktree. Ordinary subdirectories and temporary
+non-Git folders are denied.
+
+### `all-directories`
+
+Any existing ordinary directory beneath an allowed root can be approved when
+Codex opens it. The bridge adds only the exact path requested by the trust
+dialog; it does not pre-populate every subdirectory beneath the root.
+
+Reparse points, junctions, and symbolic-link paths are rejected so a safe-looking
+path cannot redirect approval outside an allowed root.
+
+## Denied-dialog handling
+
+`deniedDialogAction` controls what happens after a path fails validation:
+
+- `leave-open` records `REFUSED` and leaves the prompt visible;
+- `cancel` records `REFUSED`, waits `deniedDialogGraceSeconds`, verifies the same
+  Codex trust-dialog shape, invokes its Cancel button, and records `CANCELLED`.
+
+The grace period avoids immediately cancelling a Git/worktree prompt whose
+metadata is still settling. The bridge never cancels an arbitrary window.
 
 ## Backups and safe writes
 
@@ -175,7 +231,8 @@ pwsh.exe -NoLogo -NoProfile -File .\Status.ps1
 ```
 
 The status command reports the task, process, package version, configured roots,
-managed path count, runtime hash, and recent log records.
+trust mode, denied-dialog policy, managed path count, runtime hash, and recent
+log records.
 
 The main log is:
 
@@ -186,17 +243,21 @@ The main log is:
 Important events include:
 
 - `STARTED` — runtime started and loaded its configuration;
-- `RECONCILED` — repository/worktree discovery completed;
+- `RECONCILED` — discovery and managed-path reconciliation completed;
 - `CONFIG_SYNCED` — the managed `config.toml` block changed;
-- `APPROVED` — a matching Codex trust dialog was approved; and
-- `REFUSED` — a dialog or path failed a safety check.
+- `APPROVED` — a matching Codex trust dialog was approved;
+- `REFUSED` — a dialog or path failed a policy or safety check; and
+- `CANCELLED` — a verified denied trust dialog was closed through its Cancel
+  button.
+- `DIALOG_HANDLER_ERROR` — one trust dialog could not be handled safely; the
+  bridge records the isolated failure and continues scanning other dialogs.
 
 ## Upgrade
 
 Pull or download a newer release and run `Install.cmd` again. The installer stops
 the existing task/process, copies the new runtime, recreates the task, and
-verifies startup readiness. Pass custom `-AllowedRoots` again when upgrading;
-otherwise the installer uses `C:\PROJECT` and `E:\PROJECT`.
+verifies startup readiness. Pass custom roots and policy options again when
+upgrading.
 
 ## Privacy and data handling
 
@@ -232,13 +293,15 @@ pwsh.exe -NoLogo -NoProfile -File .\Uninstall.ps1 `
 Run `Status.ps1`, then inspect the main log. Confirm that PowerShell 7, Git for
 Windows, and Codex Desktop are installed for the same interactive Windows user.
 
-### A trust prompt is refused
+### A trust prompt is refused or cancelled
 
-Check the `REFUSED` record. Common reasons are:
+Check the `REFUSED` or `CANCELLED` record. Common reasons are:
 
 - the folder is outside `allowedRoots`;
-- the folder is not a Git root or registered worktree;
-- the exact bridge-managed trust entry has not been written yet; or
+- `trustMode` is `git-only` and the folder is not a Git root or registered
+  worktree;
+- the path or one of its ancestors inside the allowed root is a reparse point;
+- the directory no longer exists; or
 - a Codex Desktop update changed the dialog's accessible structure.
 
 The bridge intentionally fails closed rather than clicking an unknown dialog.
@@ -252,9 +315,10 @@ files in a public issue.
 
 ## Security model and limitations
 
-- Allowed roots are a security boundary. Broad roots such as `C:\PROJECT` trust
-  every valid Git root/worktree discovered beneath them. Prefer narrower roots
-  when sharing a machine with untrusted repositories.
+- Allowed roots are a security boundary. In `git-only` mode, broad roots such as
+  `C:\PROJECT` trust every valid Git root/worktree discovered beneath them. In
+  `all-directories` mode, any existing non-reparse directory beneath the root can
+  be approved when Codex opens it. Prefer narrower roots on shared machines.
 - The tool does not bypass Windows access control, Codex authentication, model
   permissions, command approvals, or sandbox policies.
 - The tool does not repair a crashed or unresponsive Codex Desktop process.
@@ -281,8 +345,11 @@ Run the isolated offline smoke test:
 pwsh.exe -NoLogo -NoProfile -File .\tests\OfflineSmoke.ps1
 ```
 
-The test uses a temporary Git repository, creates a registered worktree, verifies
-the generated trust block, and removes its temporary files afterwards.
+The test uses a temporary Git repository and worktree, exercises v0.1-compatible
+`git-only` defaults, verifies `all-directories` retention and pruning for an
+ordinary directory, preserves an existing double-quoted TOML project table
+without creating a duplicate, rejects a junction, and removes all temporary
+files.
 
 ## Releases
 

@@ -1,6 +1,12 @@
 [CmdletBinding()]
 param(
     [string[]]$AllowedRoots = @('C:\PROJECT', 'E:\PROJECT'),
+    [ValidateSet('git-only', 'all-directories')]
+    [string]$TrustMode = 'git-only',
+    [ValidateSet('leave-open', 'cancel')]
+    [string]$DeniedDialogAction = 'leave-open',
+    [ValidateRange(0, 60)]
+    [int]$DeniedDialogGraceSeconds = 3,
     [string]$TaskName = 'Codex-Worktree-Trust-Bridge'
 )
 
@@ -79,6 +85,9 @@ $configuration = [ordered]@{
     uiPollIntervalMs = 750
     reconcileIntervalSeconds = 60
     discoveryDepth = 4
+    trustMode = $TrustMode
+    deniedDialogAction = $DeniedDialogAction
+    deniedDialogGraceSeconds = $DeniedDialogGraceSeconds
     enableConfigTrust = $true
     enableUiAutoApprove = $true
     pruneMissingManagedEntries = $true
@@ -101,7 +110,7 @@ $trigger = New-ScheduledTaskTrigger -AtLogOn -User ([System.Security.Principal.W
 $principal = New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero)
 
-Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description 'Portable Codex worktree trust config sync and UI auto-approval bridge.' -Force | Out-Null
+Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description 'Portable Codex folder trust config sync, guarded UI auto-approval, and denied-dialog handling bridge.' -Force | Out-Null
 $installStartedAt = [DateTimeOffset]::Now
 Start-ScheduledTask -TaskName $TaskName
 
@@ -124,15 +133,25 @@ do {
     $process = Get-CimInstance Win32_Process -Filter "ProcessId=$($process.ProcessId)" -ErrorAction SilentlyContinue
     if (-not $process) { break }
     $hasStartLog = $false
+    $hasReconciledLog = $false
     if (Test-Path -LiteralPath $bridgeLogPath -PathType Leaf) {
-        foreach ($line in @(Get-Content -LiteralPath $bridgeLogPath -Tail 30 -ErrorAction SilentlyContinue)) {
+        foreach ($line in @(Get-Content -LiteralPath $bridgeLogPath -Tail 500 -ErrorAction SilentlyContinue)) {
             try {
                 $entry = $line | ConvertFrom-Json
+                $entryTime = [DateTimeOffset]::Parse([string]$entry.timestamp)
                 if ($entry.event -eq 'STARTED' -and
                     [int]$entry.data.pid -eq [int]$process.ProcessId -and
-                    [DateTimeOffset]::Parse([string]$entry.timestamp) -ge $installStartedAt.AddSeconds(-2)) {
+                    $entryTime -ge $installStartedAt.AddSeconds(-2) -and
+                    [string]$entry.data.trustMode -eq $TrustMode -and
+                    [string]$entry.data.deniedDialogAction -eq $DeniedDialogAction -and
+                    [int]$entry.data.deniedDialogGraceSeconds -eq $DeniedDialogGraceSeconds) {
                     $hasStartLog = $true
-                    break
+                }
+                if ($entry.event -eq 'RECONCILED' -and
+                    [int]$entry.data.pid -eq [int]$process.ProcessId -and
+                    $entryTime -ge $installStartedAt.AddSeconds(-2) -and
+                    [string]$entry.data.trustMode -eq $TrustMode) {
+                    $hasReconciledLog = $true
                 }
             }
             catch {}
@@ -140,9 +159,9 @@ do {
     }
     $hasManagedBlock = (Test-Path -LiteralPath $codexConfigPath -PathType Leaf) -and
         ([IO.File]::ReadAllText($codexConfigPath).Contains('# BEGIN CODEX WORKTREE TRUST BRIDGE'))
-    $runtimeReady = $hasStartLog -and $hasManagedBlock
+    $runtimeReady = $hasStartLog -and $hasReconciledLog -and $hasManagedBlock
 } while (-not $runtimeReady -and (Get-Date) -lt $readyDeadline)
-if (-not $runtimeReady) { throw 'The bridge process started but did not publish its log/config readiness evidence.' }
+if (-not $runtimeReady) { throw 'The bridge process started but did not publish matching STARTED, RECONCILED, and config readiness evidence.' }
 
 $legacyItemsRemoved = [Collections.Generic.List[string]]::new()
 $legacyFiles = @(
@@ -186,6 +205,9 @@ $info = Get-ScheduledTaskInfo -TaskName $TaskName
     RuntimePath = $runtimePath
     ConfigPath = $configPath
     AllowedRoots = $normalizedRoots
+    TrustMode = $TrustMode
+    DeniedDialogAction = $DeniedDialogAction
+    DeniedDialogGraceSeconds = $DeniedDialogGraceSeconds
     TaskName = $TaskName
     TaskState = [string]$task.State
     LastTaskResult = $info.LastTaskResult

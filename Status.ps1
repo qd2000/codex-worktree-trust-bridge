@@ -36,6 +36,9 @@ $result = [pscustomobject]@{
     } } else { $null }
     PackageVersion = if (Test-Path -LiteralPath (Join-Path $installRoot 'VERSION')) { (Get-Content (Join-Path $installRoot 'VERSION') -Raw).Trim() } else { $null }
     AllowedRoots = if ($config) { @($config.allowedRoots) } else { @() }
+    TrustMode = if ($config -and $config.PSObject.Properties['trustMode']) { [string]$config.trustMode } else { 'git-only' }
+    DeniedDialogAction = if ($config -and $config.PSObject.Properties['deniedDialogAction']) { [string]$config.deniedDialogAction } else { 'leave-open' }
+    DeniedDialogGraceSeconds = if ($config -and $config.PSObject.Properties['deniedDialogGraceSeconds']) { [int]$config.deniedDialogGraceSeconds } else { 3 }
     ManagedPathCount = if ($state) { @($state.managedPaths).Count } else { 0 }
     RuntimeHash = if (Test-Path -LiteralPath $runtimePath) { (Get-FileHash -Algorithm SHA256 -LiteralPath $runtimePath).Hash } else { $null }
     RecentLog = if (Test-Path -LiteralPath $logPath) { @(Get-Content -LiteralPath $logPath -Tail 12) } else { @() }

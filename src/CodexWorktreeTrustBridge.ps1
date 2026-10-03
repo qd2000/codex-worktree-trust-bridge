@@ -58,6 +58,36 @@ $EnableConfigTrust = [bool]$BridgeConfig.enableConfigTrust
 $EnableUiAutoApprove = [bool]$BridgeConfig.enableUiAutoApprove
 $PruneMissingManagedEntries = [bool]$BridgeConfig.pruneMissingManagedEntries
 
+$trustModeProperty = $BridgeConfig.PSObject.Properties['trustMode']
+$TrustMode = if ($null -ne $trustModeProperty) {
+    ([string]$trustModeProperty.Value).Trim().ToLowerInvariant()
+}
+else {
+    'git-only'
+}
+if ($TrustMode -notin @('git-only', 'all-directories')) {
+    throw "Unsupported trustMode '$TrustMode'. Expected git-only or all-directories."
+}
+
+$deniedActionProperty = $BridgeConfig.PSObject.Properties['deniedDialogAction']
+$DeniedDialogAction = if ($null -ne $deniedActionProperty) {
+    ([string]$deniedActionProperty.Value).Trim().ToLowerInvariant()
+}
+else {
+    'leave-open'
+}
+if ($DeniedDialogAction -notin @('leave-open', 'cancel')) {
+    throw "Unsupported deniedDialogAction '$DeniedDialogAction'. Expected leave-open or cancel."
+}
+
+$deniedGraceProperty = $BridgeConfig.PSObject.Properties['deniedDialogGraceSeconds']
+$DeniedDialogGraceSeconds = if ($null -ne $deniedGraceProperty) {
+    [Math]::Max(0, [Math]::Min(60, [int]$deniedGraceProperty.Value))
+}
+else {
+    3
+}
+
 $CodexHome = Join-Path $env:USERPROFILE '.codex'
 $CodexConfigPath = Join-Path $CodexHome 'config.toml'
 $StateDirectory = Join-Path $CodexHome 'state'
@@ -78,7 +108,7 @@ else {
     ($InstanceName -replace '[^A-Za-z0-9_.-]', '_')
 }
 $InstanceMutex = [Threading.Mutex]::new($false, "Local\CodexWorktreeTrustBridge-$instanceToken")
-$ConfigMutex = [Threading.Mutex]::new($false, "Local\CodexWorktreeTrustBridgeConfig-$instanceToken")
+$ConfigMutex = [Threading.Mutex]::new($false, "Local\CodexWorktreeTrustBridgeConfig-$userToken")
 $HasInstanceMutex = $false
 
 function Write-BridgeLog {
@@ -114,24 +144,85 @@ function Test-AllowedPath {
     return $false
 }
 
+function Get-AllowedRootForPath {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    foreach ($allowedRoot in $AllowedRoots) {
+        if (Test-PathInside -Child $Path -Parent $allowedRoot) { return $allowedRoot }
+    }
+    return $null
+}
+
+function Test-AllowlistedDirectory {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    if (-not [IO.Path]::IsPathFullyQualified($Path)) {
+        return [pscustomobject]@{ Ok = $false; Reason = 'path is not absolute' }
+    }
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
+        return [pscustomobject]@{ Ok = $false; Reason = 'directory does not exist' }
+    }
+
+    $canonical = Get-CanonicalPath $Path
+    $allowedRoot = Get-AllowedRootForPath $canonical
+    if (-not $allowedRoot) {
+        return [pscustomobject]@{ Ok = $false; Reason = 'path is outside the allowlist' }
+    }
+
+    try {
+        $filesystemRoot = Get-CanonicalPath ([IO.Path]::GetPathRoot($canonical))
+        $cursor = $canonical
+        while ($true) {
+            $item = Get-Item -LiteralPath $cursor -Force -ErrorAction Stop
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                return [pscustomobject]@{ Ok = $false; Reason = "reparse point is not allowed: $cursor" }
+            }
+            if ($cursor -eq $filesystemRoot) { break }
+            $parent = [IO.Directory]::GetParent($cursor)
+            if (-not $parent) {
+                return [pscustomobject]@{ Ok = $false; Reason = 'path ancestry could not be validated' }
+            }
+            $cursor = Get-CanonicalPath $parent.FullName
+        }
+    }
+    catch {
+        return [pscustomobject]@{ Ok = $false; Reason = "path validation failed: $($_.Exception.Message)" }
+    }
+
+    return [pscustomobject]@{ Ok = $true; Path = $canonical; AllowedRoot = $allowedRoot }
+}
+
 function Test-RegisteredGitWorktree {
     param([Parameter(Mandatory = $true)][string]$Path)
-    if (-not [IO.Path]::IsPathFullyQualified($Path)) { return $false }
-    if (-not (Test-Path -LiteralPath $Path -PathType Container)) { return $false }
-    if (-not (Test-AllowedPath $Path)) { return $false }
+    $directoryValidation = Test-AllowlistedDirectory $Path
+    if (-not $directoryValidation.Ok) { return $false }
     try {
-        $top = (Invoke-GitLines -WorkingDirectory $Path -Arguments @('rev-parse', '--show-toplevel') | Select-Object -First 1)
-        if (-not $top -or (Get-CanonicalPath $top) -ne (Get-CanonicalPath $Path)) { return $false }
+        $canonical = $directoryValidation.Path
+        $top = (Invoke-GitLines -WorkingDirectory $canonical -Arguments @('rev-parse', '--show-toplevel') | Select-Object -First 1)
+        if (-not $top -or (Get-CanonicalPath $top) -ne $canonical) { return $false }
         $registered = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-        foreach ($line in Invoke-GitLines -WorkingDirectory $Path -Arguments @('worktree', 'list', '--porcelain')) {
+        foreach ($line in Invoke-GitLines -WorkingDirectory $canonical -Arguments @('worktree', 'list', '--porcelain')) {
             if ($line -match '^worktree\s+(.+)$') {
                 [void]$registered.Add((Get-CanonicalPath $Matches[1].Trim()))
             }
         }
-        return $registered.Contains((Get-CanonicalPath $Path))
+        return $registered.Contains($canonical)
     }
     catch {
         return $false
+    }
+}
+
+function Test-TrustEligiblePath {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $directoryValidation = Test-AllowlistedDirectory $Path
+    if (-not $directoryValidation.Ok) { return $directoryValidation }
+    if ($TrustMode -eq 'git-only' -and -not (Test-RegisteredGitWorktree $directoryValidation.Path)) {
+        return [pscustomobject]@{ Ok = $false; Reason = 'path is not an allowlisted registered Git worktree' }
+    }
+    return [pscustomobject]@{
+        Ok = $true
+        Path = $directoryValidation.Path
+        AllowedRoot = $directoryValidation.AllowedRoot
+        TrustMode = $TrustMode
     }
 }
 
@@ -162,6 +253,7 @@ function Save-ManagedState {
         schema = 'codex-worktree-trust-bridge.state'
         version = 1
         updatedAt = (Get-Date).ToString('o')
+        trustMode = $TrustMode
         managedPaths = @($ManagedPaths | Sort-Object)
     }
     $temporary = "$StatePath.tmp-$PID"
@@ -198,20 +290,88 @@ function Remove-ManagedBlocks {
     return $result.TrimEnd()
 }
 
+function ConvertFrom-TomlBasicString {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Value)
+
+    $builder = [Text.StringBuilder]::new()
+    for ($index = 0; $index -lt $Value.Length; $index++) {
+        $character = $Value[$index]
+        if ($character -ne '\') {
+            [void]$builder.Append($character)
+            continue
+        }
+
+        $index++
+        if ($index -ge $Value.Length) {
+            throw 'Invalid trailing escape in a TOML basic string.'
+        }
+
+        $escape = $Value[$index]
+        switch -CaseSensitive ($escape) {
+            '"' { [void]$builder.Append('"') }
+            '\' { [void]$builder.Append('\') }
+            'b' { [void]$builder.Append([char]8) }
+            't' { [void]$builder.Append([char]9) }
+            'n' { [void]$builder.Append([char]10) }
+            'f' { [void]$builder.Append([char]12) }
+            'r' { [void]$builder.Append([char]13) }
+            'u' {
+                if ($index + 4 -ge $Value.Length) {
+                    throw 'Incomplete Unicode escape in a TOML basic string.'
+                }
+                $hex = $Value.Substring($index + 1, 4)
+                if ($hex -notmatch '^[0-9A-Fa-f]{4}$') {
+                    throw "Invalid Unicode escape in a TOML basic string: \u$hex"
+                }
+                $codePoint = [Convert]::ToInt32($hex, 16)
+                if ($codePoint -ge 0xD800 -and $codePoint -le 0xDFFF) {
+                    throw 'A TOML Unicode escape cannot encode an isolated surrogate.'
+                }
+                [void]$builder.Append([char]::ConvertFromUtf32($codePoint))
+                $index += 4
+            }
+            'U' {
+                if ($index + 8 -ge $Value.Length) {
+                    throw 'Incomplete long Unicode escape in a TOML basic string.'
+                }
+                $hex = $Value.Substring($index + 1, 8)
+                if ($hex -notmatch '^[0-9A-Fa-f]{8}$') {
+                    throw "Invalid long Unicode escape in a TOML basic string: \U$hex"
+                }
+                $codePoint = [Convert]::ToInt64($hex, 16)
+                if ($codePoint -gt 0x10FFFF -or ($codePoint -ge 0xD800 -and $codePoint -le 0xDFFF)) {
+                    throw "Invalid Unicode code point in a TOML basic string: U+$hex"
+                }
+                [void]$builder.Append([char]::ConvertFromUtf32([int]$codePoint))
+                $index += 8
+            }
+            default { throw "Unsupported TOML basic-string escape: \$escape" }
+        }
+    }
+    return $builder.ToString()
+}
+
 function Get-ManualProjectSections {
     param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Text)
     $headers = New-PathSet
     $trusted = New-PathSet
-    $pattern = "(?ms)^\s*\[projects\.'([^']+)'\]\s*\r?\n(.*?)(?=^\s*\[|\z)"
+    $pattern = @'
+(?ms)^\s*\[projects\.(?:'([^']*)'|"((?:\\.|[^"\\])*)")\]\s*(?:#[^\r\n]*)?\r?\n(.*?)(?=^\s*\[|\z)
+'@.Trim()
     foreach ($match in [regex]::Matches($Text, $pattern)) {
-        try {
-            $path = Get-CanonicalPath $match.Groups[1].Value
-            [void]$headers.Add($path)
-            if ($match.Groups[2].Value -match '(?im)^\s*trust_level\s*=\s*["'']trusted["'']\s*$') {
-                [void]$trusted.Add($path)
-            }
+        $decodedPath = if ($match.Groups[1].Success) {
+            $match.Groups[1].Value
         }
-        catch {}
+        else {
+            ConvertFrom-TomlBasicString $match.Groups[2].Value
+        }
+        $path = Get-CanonicalPath $decodedPath
+        if (-not $headers.Add($path)) {
+            throw "Duplicate TOML project table resolves to the same path: $path"
+        }
+        if ($match.Groups[3].Value -match '(?im)^\s*trust_level\s*=\s*["'']trusted["'']\s*$') {
+            [void]$trusted.Add($path)
+        }
     }
     return [pscustomobject]@{ Headers = $headers; Trusted = $trusted }
 }
@@ -266,11 +426,9 @@ function Update-CodexTrustConfig {
 function Test-ExactTrustedEntry {
     param([Parameter(Mandatory = $true)][string]$Path)
     if (-not (Test-Path -LiteralPath $CodexConfigPath -PathType Leaf)) { return $false }
-    $key = Get-CanonicalPath $Path
     $text = [IO.File]::ReadAllText($CodexConfigPath)
-    $pattern = "(?ms)^\s*\[projects\.'" + [regex]::Escape($key) + "'\]\s*\r?\n(.*?)(?=^\s*\[|\z)"
-    $section = [regex]::Match($text, $pattern)
-    return $section.Success -and $section.Groups[1].Value -match '(?im)^\s*trust_level\s*=\s*["'']trusted["'']\s*$'
+    $sections = Get-ManualProjectSections $text
+    return $sections.Trusted.Contains((Get-CanonicalPath $Path))
 }
 
 function Find-GitRoots {
@@ -293,6 +451,7 @@ function Find-GitRoots {
             if ($item.Depth -ge $DiscoveryDepth) { continue }
             foreach ($directory in Get-ChildItem -LiteralPath $item.Path -Directory -Force -ErrorAction SilentlyContinue) {
                 if ($excluded.Contains($directory.Name)) { continue }
+                if (($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
                 $queue.Enqueue([pscustomobject]@{ Path = $directory.FullName; Depth = $item.Depth + 1 })
             }
         }
@@ -315,8 +474,14 @@ function Discover-RegisteredWorktrees {
             foreach ($line in Invoke-GitLines -WorkingDirectory $gitRoot -Arguments @('worktree', 'list', '--porcelain')) {
                 if ($line -notmatch '^worktree\s+(.+)$') { continue }
                 $path = Get-CanonicalPath $Matches[1].Trim()
-                if ((Test-AllowedPath $path) -and (Test-Path -LiteralPath $path -PathType Container)) {
+                if (Test-RegisteredGitWorktree $path) {
                     [void]$result.Add($path)
+                }
+                else {
+                    Write-BridgeLog -Event 'GIT_WORKTREE_SKIPPED' -Data @{
+                        path = $path
+                        reason = 'registered path failed exact Git root/worktree validation'
+                    }
                 }
             }
         }
@@ -330,6 +495,9 @@ function Discover-RegisteredWorktrees {
 $ManagedPaths = Load-ManagedState
 $ApprovalCooldown = @{}
 $RefusalCooldown = @{}
+$CancelCooldown = @{}
+$DialogErrorCooldown = @{}
+$DenialFirstSeen = @{}
 
 function Import-LegacyManagedPaths {
     if (-not (Test-Path -LiteralPath $CodexConfigPath -PathType Leaf)) { return }
@@ -339,8 +507,9 @@ function Import-LegacyManagedPaths {
         (Get-ManagedPathsFromBlock -Text $text -BeginMarker $NewBeginMarker -EndMarker $NewEndMarker)
     )) {
         foreach ($path in $set) {
-            if ((Test-AllowedPath $path) -and (Test-RegisteredGitWorktree $path)) {
-                [void]$ManagedPaths.Add($path)
+            $validation = Test-TrustEligiblePath $path
+            if ($validation.Ok) {
+                [void]$ManagedPaths.Add($validation.Path)
             }
         }
     }
@@ -348,26 +517,32 @@ function Import-LegacyManagedPaths {
 
 function Invoke-Reconcile {
     $discovered = Discover-RegisteredWorktrees
-    if ($PruneMissingManagedEntries) {
-        $ManagedPaths.Clear()
-    }
-    foreach ($path in $discovered) { [void]$ManagedPaths.Add($path) }
-    if (-not $PruneMissingManagedEntries) {
-        foreach ($path in @($ManagedPaths)) {
-            if (-not (Test-RegisteredGitWorktree $path)) { [void]$ManagedPaths.Remove($path) }
+    $nextManagedPaths = New-PathSet
+    foreach ($path in $discovered) { [void]$nextManagedPaths.Add($path) }
+    foreach ($path in @($ManagedPaths)) {
+        $validation = Test-TrustEligiblePath $path
+        if ($validation.Ok) {
+            [void]$nextManagedPaths.Add($validation.Path)
+            continue
         }
     }
+    $ManagedPaths.Clear()
+    foreach ($path in $nextManagedPaths) { [void]$ManagedPaths.Add($path) }
     Update-CodexTrustConfig $ManagedPaths
     Save-ManagedState $ManagedPaths
-    Write-BridgeLog -Event 'RECONCILED' -Data @{ managedCount = $ManagedPaths.Count; roots = $AllowedRoots }
+    Write-BridgeLog -Event 'RECONCILED' -Data @{
+        pid = $PID
+        managedCount = $ManagedPaths.Count
+        roots = $AllowedRoots
+        trustMode = $TrustMode
+    }
 }
 
 function Ensure-ManagedTrust {
     param([Parameter(Mandatory = $true)][string]$Path)
-    $canonical = Get-CanonicalPath $Path
-    if (-not (Test-RegisteredGitWorktree $canonical)) {
-        return [pscustomobject]@{ Ok = $false; Reason = 'path is not an allowlisted registered Git worktree' }
-    }
+    $validation = Test-TrustEligiblePath $Path
+    if (-not $validation.Ok) { return $validation }
+    $canonical = $validation.Path
     [void]$ManagedPaths.Add($canonical)
     Update-CodexTrustConfig $ManagedPaths
     Save-ManagedState $ManagedPaths
@@ -403,10 +578,57 @@ function Get-DialogAncestor {
     return $null
 }
 
-function Invoke-TrustButton {
+function Get-AutomationElementIdentity {
+    param([Parameter(Mandatory = $true)]$Element)
+    try {
+        $runtimeId = @($Element.GetRuntimeId())
+        if ($runtimeId.Count) { return 'runtime:' + ($runtimeId -join '.') }
+    }
+    catch {}
+
+    $rectangle = $Element.Current.BoundingRectangle
+    return 'fallback:{0}|{1}|{2}|{3},{4},{5},{6}' -f @(
+        [int64]$Element.Current.NativeWindowHandle,
+        [string]$Element.Current.AutomationId,
+        [string]$Element.Current.ClassName,
+        [Math]::Round($rectangle.X, 2),
+        [Math]::Round($rectangle.Y, 2),
+        [Math]::Round($rectangle.Width, 2),
+        [Math]::Round($rectangle.Height, 2)
+    )
+}
+
+function Test-UiClassToken {
     param(
-        [Parameter(Mandatory = $true)]$Dialog,
-        [Parameter(Mandatory = $true)][string]$Folder
+        [Parameter(Mandatory = $true)]$Element,
+        [Parameter(Mandatory = $true)][string]$Token
+    )
+    $tokens = @(([string]$Element.Current.ClassName) -split '\s+' | Where-Object { $_ })
+    return $Token -in $tokens
+}
+
+function Select-UniqueDialogButton {
+    param(
+        [Parameter(Mandatory = $true)]$VisibleButtons,
+        [Parameter(Mandatory = $true)][string[]]$Names,
+        [Parameter(Mandatory = $true)][string]$ClassToken,
+        [Parameter(Mandatory = $true)][string]$Role
+    )
+
+    $named = @($VisibleButtons | Where-Object { [string]$_.Current.Name -in $Names })
+    if ($named.Count -gt 1) { throw "Trust dialog contains multiple $Role buttons by accessible name." }
+    if ($named.Count -eq 1) { return $named[0] }
+
+    $classMatched = @($VisibleButtons | Where-Object { Test-UiClassToken -Element $_ -Token $ClassToken })
+    if ($classMatched.Count -ne 1) {
+        throw "Trust dialog does not contain one unambiguous $Role button."
+    }
+    return $classMatched[0]
+}
+
+function Get-TrustDialogButtons {
+    param(
+        [Parameter(Mandatory = $true)]$Dialog
     )
     $condition = [System.Windows.Automation.PropertyCondition]::new(
         [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
@@ -420,32 +642,61 @@ function Invoke-TrustButton {
     }
     if ($visible.Count -lt 2) { throw 'Trust dialog does not contain the expected button set.' }
 
-    $trustButton = $visible | Where-Object {
-        [string]$_.Current.Name -in @('信任文件夹', 'Trust Folder', 'Trust this folder')
-    } | Select-Object -First 1
+    $trustButton = Select-UniqueDialogButton -VisibleButtons $visible `
+        -Names @('信任文件夹', 'Trust Folder', 'Trust this folder') `
+        -ClassToken 'bg-primary-solid' -Role 'trust'
+    $cancelButton = Select-UniqueDialogButton -VisibleButtons $visible `
+        -Names @('取消', 'Cancel') `
+        -ClassToken 'bg-transparent' -Role 'cancel'
 
-    if (-not $trustButton) {
-        $trustButton = $visible | Where-Object { [string]$_.Current.ClassName -like '*bg-primary-solid*' } | Select-Object -First 1
-        $cancel = $visible | Where-Object { [string]$_.Current.ClassName -like '*bg-transparent*' } | Select-Object -First 1
-        if (-not $trustButton -or -not $cancel) {
-            throw 'Dialog buttons do not match the Codex trust-dialog shape.'
-        }
+    $trustIdentity = Get-AutomationElementIdentity $trustButton
+    $cancelIdentity = Get-AutomationElementIdentity $cancelButton
+    if ($trustIdentity -eq $cancelIdentity) {
+        throw 'Trust and cancel resolved to the same UI Automation element.'
     }
 
-    $invokePattern = $null
-    if (-not $trustButton.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$invokePattern)) {
+    $trustInvokePattern = $null
+    if (-not $trustButton.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$trustInvokePattern)) {
         throw 'Trust button does not support InvokePattern.'
     }
-    $buttonName = [string]$trustButton.Current.Name
-    $buttonClass = [string]$trustButton.Current.ClassName
+    $cancelInvokePattern = $null
+    if (-not $cancelButton.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$cancelInvokePattern)) {
+        throw 'Cancel button does not support InvokePattern.'
+    }
+
+    return [pscustomobject]@{
+        Trust = $trustButton
+        Cancel = $cancelButton
+        TrustInvoke = $trustInvokePattern
+        CancelInvoke = $cancelInvokePattern
+    }
+}
+
+function Invoke-TrustDialogAction {
+    param(
+        [Parameter(Mandatory = $true)]$Buttons,
+        [Parameter(Mandatory = $true)][string]$Folder,
+        [Parameter(Mandatory = $true)][ValidateSet('approve', 'cancel')][string]$Action,
+        [string]$Reason
+    )
+    $button = if ($Action -eq 'approve') { $Buttons.Trust } else { $Buttons.Cancel }
+    $invokePattern = if ($Action -eq 'approve') { $Buttons.TrustInvoke } else { $Buttons.CancelInvoke }
+    $buttonName = [string]$button.Current.Name
+    $buttonClass = [string]$button.Current.ClassName
     $invokePattern.Invoke()
-    Write-BridgeLog -Event 'APPROVED' -Data @{ folder = $Folder; buttonName = $buttonName; buttonClass = $buttonClass }
+    $event = if ($Action -eq 'approve') { 'APPROVED' } else { 'CANCELLED' }
+    Write-BridgeLog -Event $event -Data @{
+        folder = $Folder
+        reason = $Reason
+        buttonName = $buttonName
+        buttonClass = $buttonClass
+    }
 }
 
 function Invoke-UiScan {
     if (-not $EnableUiAutoApprove) { return 0 }
-    $handled = 0
-    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $candidates = [Collections.Generic.List[object]]::new()
+    $seenDialogKeys = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     foreach ($root in Get-CodexRootElements) {
         $elements = $root.FindAll(
             [System.Windows.Automation.TreeScope]::Descendants,
@@ -456,34 +707,94 @@ function Invoke-UiScan {
             if ($element.Current.ControlType -ne [System.Windows.Automation.ControlType]::ListItem) { continue }
             $folder = [string]$element.Current.Name
             if (-not $folder -or -not [IO.Path]::IsPathFullyQualified($folder)) { continue }
-            if (-not $seen.Add($folder)) { continue }
             $folderKey = Get-CanonicalPath $folder
-            $now = [DateTimeOffset]::UtcNow
-            if ($ApprovalCooldown.ContainsKey($folderKey) -and
-                ($now - $ApprovalCooldown[$folderKey]).TotalSeconds -lt 10) {
-                continue
-            }
             $dialog = Get-DialogAncestor $element
             if (-not $dialog) { continue }
+            $dialogIdentity = Get-AutomationElementIdentity $dialog
+            $dialogKey = "$folderKey|$dialogIdentity"
+            if (-not $seenDialogKeys.Add($dialogKey)) { continue }
+            [void]$candidates.Add([pscustomobject]@{
+                Folder = $folder
+                FolderKey = $folderKey
+                Dialog = $dialog
+                DialogKey = $dialogKey
+            })
+        }
+    }
 
-            $validation = Ensure-ManagedTrust $folder
+    foreach ($dictionary in @($ApprovalCooldown, $CancelCooldown, $RefusalCooldown, $DialogErrorCooldown, $DenialFirstSeen)) {
+        foreach ($key in @($dictionary.Keys)) {
+            if (-not $seenDialogKeys.Contains([string]$key)) { [void]$dictionary.Remove($key) }
+        }
+    }
+
+    foreach ($candidate in $candidates) {
+        $now = [DateTimeOffset]::UtcNow
+        $dialogKey = $candidate.DialogKey
+        if ($ApprovalCooldown.ContainsKey($dialogKey) -and
+            ($now - $ApprovalCooldown[$dialogKey]).TotalSeconds -lt 10) {
+            continue
+        }
+        if ($CancelCooldown.ContainsKey($dialogKey) -and
+            ($now - $CancelCooldown[$dialogKey]).TotalSeconds -lt 10) {
+            continue
+        }
+
+        try {
+            # Validate and resolve both actionable controls before persisting trust.
+            # An ambiguous or changed dialog must not create a durable authorization.
+            $buttons = Get-TrustDialogButtons $candidate.Dialog
+            $validation = Ensure-ManagedTrust $candidate.Folder
             if (-not $validation.Ok) {
-                if (-not $RefusalCooldown.ContainsKey($folderKey) -or
-                    ($now - $RefusalCooldown[$folderKey]).TotalSeconds -ge 30) {
-                    Write-BridgeLog -Event 'REFUSED' -Data @{ folder = $folder; reason = $validation.Reason }
-                    $RefusalCooldown[$folderKey] = $now
+                $denialState = $DenialFirstSeen[$dialogKey]
+                if ($null -eq $denialState -or [string]$denialState.Reason -ne [string]$validation.Reason) {
+                    $denialState = [pscustomobject]@{ FirstSeen = $now; Reason = [string]$validation.Reason }
+                    $DenialFirstSeen[$dialogKey] = $denialState
+                }
+                if (-not $RefusalCooldown.ContainsKey($dialogKey) -or
+                    ($now - $RefusalCooldown[$dialogKey]).TotalSeconds -ge 30) {
+                    Write-BridgeLog -Event 'REFUSED' -Data @{
+                        folder = $candidate.Folder
+                        reason = $validation.Reason
+                        deniedDialogAction = $DeniedDialogAction
+                        dialogIdentity = $dialogKey
+                    }
+                    $RefusalCooldown[$dialogKey] = $now
+                }
+                if ($DeniedDialogAction -eq 'cancel' -and
+                    ($now - [DateTimeOffset]$denialState.FirstSeen).TotalSeconds -ge $DeniedDialogGraceSeconds) {
+                    Invoke-TrustDialogAction -Buttons $buttons -Folder $candidate.FolderKey -Action cancel -Reason $validation.Reason
+                    $CancelCooldown[$dialogKey] = $now
+                    [void]$DenialFirstSeen.Remove($dialogKey)
+                    Start-Sleep -Milliseconds 350
+                    return 1
                 }
                 continue
             }
-            Invoke-TrustButton -Dialog $dialog -Folder $validation.Path
-            $ApprovalCooldown[$folderKey] = $now
-            [void]$RefusalCooldown.Remove($folderKey)
-            $handled++
+
+            Invoke-TrustDialogAction -Buttons $buttons -Folder $validation.Path -Action approve
+            $ApprovalCooldown[$dialogKey] = $now
+            [void]$RefusalCooldown.Remove($dialogKey)
+            [void]$DialogErrorCooldown.Remove($dialogKey)
+            [void]$DenialFirstSeen.Remove($dialogKey)
+            [void]$CancelCooldown.Remove($dialogKey)
             Start-Sleep -Milliseconds 350
-            break
+            return 1
+        }
+        catch {
+            if (-not $DialogErrorCooldown.ContainsKey($dialogKey) -or
+                ($now - $DialogErrorCooldown[$dialogKey]).TotalSeconds -ge 30) {
+                Write-BridgeLog -Event 'DIALOG_HANDLER_ERROR' -Data @{
+                    folder = $candidate.Folder
+                    dialogIdentity = $dialogKey
+                    error = $_.Exception.ToString()
+                }
+                $DialogErrorCooldown[$dialogKey] = $now
+            }
+            continue
         }
     }
-    return $handled
+    return 0
 }
 
 try {
@@ -496,6 +807,9 @@ try {
         once = [bool]$Once
         uiPollIntervalMs = $UiPollIntervalMs
         reconcileIntervalSeconds = $ReconcileIntervalSeconds
+        trustMode = $TrustMode
+        deniedDialogAction = $DeniedDialogAction
+        deniedDialogGraceSeconds = $DeniedDialogGraceSeconds
     }
 
     Import-LegacyManagedPaths
