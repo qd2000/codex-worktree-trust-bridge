@@ -4,6 +4,11 @@ on:
   push:
     tags:
       - "v*"
+    branches:
+      - main
+    paths:
+      - ".github/workflows/release.yml"
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -12,17 +17,35 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out tag
+      - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Validate version and build portable archive
+      - name: Select release tag and build portable archive
         shell: pwsh
         run: |
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            $tag = $env:GITHUB_REF_NAME
+          }
+          else {
+            $branchVersion = (Get-Content -LiteralPath VERSION -Raw).Trim()
+            $tag = "v$branchVersion"
+            & git fetch --tags --force
+            if ($LASTEXITCODE -ne 0) {
+              throw 'Unable to fetch release tags.'
+            }
+            & git checkout --detach $tag
+            if ($LASTEXITCODE -ne 0) {
+              throw "Release tag $tag does not exist."
+            }
+          }
+
           $version = (Get-Content -LiteralPath VERSION -Raw).Trim()
-          $tag = $env:GITHUB_REF_NAME
           if ($tag -ne "v$version") {
             throw "Tag $tag does not match VERSION $version"
           }
+          "RELEASE_TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
           $stageRoot = Join-Path $env:RUNNER_TEMP "codex-worktree-trust-bridge-$version"
           New-Item -ItemType Directory -Force -Path $stageRoot | Out-Null
@@ -55,7 +78,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF_NAME}"
+          tag="${RELEASE_TAG}"
           asset="dist/codex-worktree-trust-bridge-${tag#v}.zip"
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" "$asset" --clobber
@@ -64,3 +87,4 @@ jobs:
               --verify-tag \
               --generate-notes \
               --title "Codex Worktree Trust Bridge $tag"
+          fi
