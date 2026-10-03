@@ -1,0 +1,66 @@
+name: Publish release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out tag
+        uses: actions/checkout@v4
+
+      - name: Validate version and build portable archive
+        shell: pwsh
+        run: |
+          $version = (Get-Content -LiteralPath VERSION -Raw).Trim()
+          $tag = $env:GITHUB_REF_NAME
+          if ($tag -ne "v$version") {
+            throw "Tag $tag does not match VERSION $version"
+          }
+
+          $stageRoot = Join-Path $env:RUNNER_TEMP "codex-worktree-trust-bridge-$version"
+          New-Item -ItemType Directory -Force -Path $stageRoot | Out-Null
+          $items = @(
+            'Install.cmd',
+            'Install.ps1',
+            'Uninstall.cmd',
+            'Uninstall.ps1',
+            'Status.ps1',
+            'README.md',
+            'CHANGELOG.md',
+            'SECURITY.md',
+            'LICENSE',
+            'VERSION',
+            'config',
+            'src',
+            'tests'
+          )
+          foreach ($item in $items) {
+            Copy-Item -LiteralPath $item -Destination $stageRoot -Recurse -Force
+          }
+
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $archive = Join-Path (Resolve-Path dist) "codex-worktree-trust-bridge-$version.zip"
+          Compress-Archive -Path $stageRoot -DestinationPath $archive -CompressionLevel Optimal
+
+      - name: Create or update GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          asset="dist/codex-worktree-trust-bridge-${tag#v}.zip"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "$asset" --clobber
+          else
+            gh release create "$tag" "$asset" \
+              --verify-tag \
+              --generate-notes \
+              --title "Codex Worktree Trust Bridge $tag"

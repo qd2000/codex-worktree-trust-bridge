@@ -1,0 +1,10 @@
+.test-profile/
+.tmp-*
+*.tmp
+*.log
+*.zip
+dist/
+codex-worktree-trust-bridge.json
+*.local.json
+.DS_Store
+Thumbs.db
