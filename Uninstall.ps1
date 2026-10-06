@@ -9,6 +9,8 @@ $ErrorActionPreference = 'Stop'
 
 $codexHome = Join-Path $env:USERPROFILE '.codex'
 $installRoot = Join-Path $codexHome 'tools\codex-worktree-trust-bridge'
+$runtimePath = Join-Path $installRoot 'CodexWorktreeTrustBridge.ps1'
+$launcherPath = Join-Path $installRoot 'CodexWorktreeTrustBridge.Launcher.exe'
 $configPath = Join-Path $codexHome 'codex-worktree-trust-bridge.json'
 $statePath = Join-Path $codexHome 'state\codex-worktree-trust-bridge.json'
 $codexConfigPath = Join-Path $codexHome 'config.toml'
@@ -21,7 +23,20 @@ if ($task) {
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
 }
 
-Start-Sleep -Milliseconds 750
+$shutdownDeadline = (Get-Date).AddSeconds(10)
+do {
+    $bridgeProcesses = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+        ($_.ExecutablePath -and $_.ExecutablePath -ieq $launcherPath) -or
+        ($_.Name -ieq 'pwsh.exe' -and $_.CommandLine -and $_.CommandLine -like "*$runtimePath*")
+    })
+    if (-not $bridgeProcesses.Count) { break }
+    Start-Sleep -Milliseconds 250
+} while ((Get-Date) -lt $shutdownDeadline)
+
+foreach ($bridgeProcess in $bridgeProcesses) {
+    Stop-Process -Id $bridgeProcess.ProcessId -Force -ErrorAction SilentlyContinue
+}
+
 New-Item -ItemType Directory -Force -Path $archiveRoot | Out-Null
 New-Item -ItemType Directory -Force -Path $archive | Out-Null
 foreach ($path in @($installRoot, $configPath, $statePath)) {

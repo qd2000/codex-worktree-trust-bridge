@@ -95,6 +95,11 @@ $StatePath = Join-Path $StateDirectory 'codex-worktree-trust-bridge.json'
 $LogDirectory = Join-Path $CodexHome 'log'
 $LogPath = Join-Path $LogDirectory 'codex-worktree-trust-bridge.log'
 $BackupDirectory = Join-Path $CodexHome 'backups\codex-worktree-trust-bridge'
+$GitExecutable = (Get-Command git.exe -ErrorAction Stop).Source
+$LauncherProcessId = if ($env:CODEX_WORKTREE_TRUST_BRIDGE_LAUNCHER_PID) {
+    [int]$env:CODEX_WORKTREE_TRUST_BRIDGE_LAUNCHER_PID
+}
+else { $null }
 
 foreach ($directory in @($StateDirectory, $LogDirectory, $BackupDirectory)) {
     New-Item -ItemType Directory -Force -Path $directory | Out-Null
@@ -129,11 +134,43 @@ function Invoke-GitLines {
         [Parameter(Mandatory = $true)][string]$WorkingDirectory,
         [Parameter(Mandatory = $true)][string[]]$Arguments
     )
-    $output = @(& git.exe -C $WorkingDirectory @Arguments 2>$null)
-    if ($LASTEXITCODE -ne 0) {
-        throw "git -C '$WorkingDirectory' $($Arguments -join ' ') failed with exit $LASTEXITCODE"
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $GitExecutable
+    $startInfo.WorkingDirectory = $WorkingDirectory
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    [void]$startInfo.ArgumentList.Add('-C')
+    [void]$startInfo.ArgumentList.Add($WorkingDirectory)
+    foreach ($argument in $Arguments) {
+        [void]$startInfo.ArgumentList.Add($argument)
     }
-    return $output
+
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    try {
+        if (-not $process.Start()) {
+            throw 'git.exe did not start.'
+        }
+        $outputTask = $process.StandardOutput.ReadToEndAsync()
+        $errorTask = $process.StandardError.ReadToEndAsync()
+        $process.WaitForExit()
+        $outputText = $outputTask.GetAwaiter().GetResult()
+        $errorText = $errorTask.GetAwaiter().GetResult().Trim()
+        $exitCode = $process.ExitCode
+    }
+    finally {
+        $process.Dispose()
+    }
+
+    if ($exitCode -ne 0) {
+        $detail = if ([string]::IsNullOrWhiteSpace($errorText)) { '' } else { ": $errorText" }
+        throw "git -C '$WorkingDirectory' $($Arguments -join ' ') failed with exit $exitCode$detail"
+    }
+    if ([string]::IsNullOrEmpty($outputText)) { return @() }
+    return @($outputText -split '\r?\n' | Where-Object { $_.Length -gt 0 })
 }
 
 function Test-AllowedPath {
@@ -532,6 +569,7 @@ function Invoke-Reconcile {
     Save-ManagedState $ManagedPaths
     Write-BridgeLog -Event 'RECONCILED' -Data @{
         pid = $PID
+        launcherPid = $LauncherProcessId
         managedCount = $ManagedPaths.Count
         roots = $AllowedRoots
         trustMode = $TrustMode
@@ -802,6 +840,7 @@ try {
     if (-not $HasInstanceMutex) { exit 0 }
     Write-BridgeLog -Event 'STARTED' -Data @{
         pid = $PID
+        launcherPid = $LauncherProcessId
         configPath = $ConfigPath
         allowedRoots = $AllowedRoots
         once = [bool]$Once

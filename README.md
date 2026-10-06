@@ -50,6 +50,7 @@ later prompts.
 - Windows 10 or Windows 11
 - PowerShell 7 (`pwsh.exe`)
 - Git for Windows (`git.exe`)
+- the in-box Windows .NET Framework 4.x C# compiler used once during install
 - Codex Desktop
 - an interactive, signed-in Windows session for the same user who runs Codex
 
@@ -91,10 +92,9 @@ automatically cancel denied prompts:
 ```
 
 The installer is idempotent. Running it again upgrades the installed runtime,
-rewrites the bridge configuration, recreates the Scheduled Task, and starts a
-fresh bridge process. Pass custom roots and policy options again during an
-upgrade because the installer regenerates the JSON configuration from its
-arguments.
+recreates the Scheduled Task, and starts a fresh bridge process. Existing roots
+and trust/dialog policy are preserved during an upgrade unless the corresponding
+installer options are explicitly supplied.
 
 ## What is installed
 
@@ -103,6 +103,13 @@ One Scheduled Task is created:
 ```text
 Codex-Worktree-Trust-Bridge
 ```
+
+It runs in the current user's interactive session after logon, with a short
+startup delay so Codex and the Windows desktop can initialize. The task starts a
+small Windows GUI-subsystem launcher rather than `pwsh.exe` directly. The
+launcher and the bridge's Git subprocesses explicitly use no-console process
+creation, so normal background operation does not display PowerShell, CMD, or
+Git console windows.
 
 Installed files live under the current Windows user's Codex home:
 
@@ -137,7 +144,7 @@ Example:
 {
   "schema": "codex-worktree-trust-bridge.config",
   "version": 1,
-  "packageVersion": "0.2.0",
+  "packageVersion": "0.2.1",
   "allowedRoots": [
     "C:\\PROJECT",
     "E:\\PROJECT"
@@ -230,9 +237,9 @@ Check the installation:
 pwsh.exe -NoLogo -NoProfile -File .\Status.ps1
 ```
 
-The status command reports the task, process, package version, configured roots,
-trust mode, denied-dialog policy, managed path count, runtime hash, and recent
-log records.
+The status command reports the task, launcher/runtime process pair, health
+state, package version, configured roots, trust mode, denied-dialog policy,
+managed path count, hashes, and recent log records.
 
 The main log is:
 
@@ -343,6 +350,8 @@ Run the isolated offline smoke test:
 
 ```powershell
 pwsh.exe -NoLogo -NoProfile -File .\tests\OfflineSmoke.ps1
+pwsh.exe -NoLogo -NoProfile -File .\tests\LauncherSmoke.ps1
+pwsh.exe -NoLogo -NoProfile -File .\tests\GitChildSmoke.ps1
 ```
 
 The test uses a temporary Git repository and worktree, exercises v0.1-compatible
@@ -350,6 +359,13 @@ The test uses a temporary Git repository and worktree, exercises v0.1-compatible
 ordinary directory, preserves an existing double-quoted TOML project table
 without creating a duplicate, rejects a junction, and removes all temporary
 files.
+
+After installing on a Windows desktop, exercise repeated real Scheduled Task
+starts and verify the launcher/runtime process pair has no visible main window:
+
+```powershell
+pwsh.exe -NoLogo -NoProfile -File .\tests\InstalledSilentStartup.ps1 -Iterations 5
+```
 
 ## Releases
 

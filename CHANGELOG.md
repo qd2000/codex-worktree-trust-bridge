@@ -4,6 +4,30 @@ All notable changes to this project are documented in this file.
 
 The project follows semantic versioning.
 
+## [0.2.1] - 2026-10-06
+
+### Added
+
+- A tiny Windows GUI-subsystem launcher that starts the PowerShell runtime with
+  `UseShellExecute = false`, `CreateNoWindow = true`, and hidden window style.
+- Launcher smoke coverage that verifies the PE GUI subsystem, parent/child
+  identity, paths containing spaces, and a zero console-window handle.
+- A console-subsystem fake Git probe that verifies every real runtime Git child
+  is created with a zero console-window handle.
+- Installed-task stress coverage for repeated silent starts and matching
+  `STARTED`/`RECONCILED` process evidence.
+
+### Changed
+
+- The Scheduled Task now starts the no-console launcher after interactive user
+  logon instead of starting `pwsh.exe` directly.
+- Git subprocesses are created without a shell or console window and have their
+  output captured explicitly.
+- Upgrades preserve existing roots and trust/dialog policy unless those options
+  are explicitly supplied to the installer.
+- Status now validates the launcher/runtime parent-child pair, current log
+  evidence, duplicate processes, and task action identity.
+
 ## [0.2.0] - 2026-10-03
 
 ### Added
