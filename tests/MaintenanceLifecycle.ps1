@@ -362,7 +362,7 @@ trust_level = "trusted"
 
     # Runtime crash should end the launcher and the controlled child. The task has
     # no restart policy in the preserved XML, so there is no restart loop.
-    $running = (Get-BridgeInstalledStatus -Layout $layout).ProcessSet
+    $running = (Wait-BridgeReady -Layout $layout -TimeoutSeconds 20).ProcessSet
     Set-ControlMode crash-after-ready
     foreach ($identity in @($running.Runtime, $running.Launcher) + @($running.Descendants)) {
         if ($identity -and -not (Wait-BridgeProcessIdentityExit -Identity $identity -TimeoutMilliseconds 15000)) {
