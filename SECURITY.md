@@ -51,6 +51,25 @@ There is no forced GC, working-set trimming or periodic whole-bridge restart.
 Private host logs, process command lines, trust configuration, and test artifacts
 remain local and must not be uploaded as public release assets.
 
+Git commands are independently created inside a kill-on-close Job Object. Only
+the three standard handles are inherited. Stdout/stderr are captured in bounded
+temporary files and decoded with strict UTF-8; command time, cleanup time,
+output bytes, Job memory and active process count have explicit limits. Timeout
+or any limit breach terminates the owned tree and is never treated as truncated
+success. Reconcile additionally bounds elapsed time and directory, repository,
+worktree and command counts. An incomplete discovery preserves the previous
+managed trust state and forces unhealthy status until a complete run succeeds.
+
+Canary and fleet installation are separate authorities. A clean accepted
+candidate can be installed first only on QDSPC. Local/T113 require a QDSPC gray
+authorization bound to the exact manifest and source commit. The receipt must
+contain at least two hours, 200 usable post-warm-up samples, resource/activity/
+integrity passes and verified removal of the controlled Git workload from disk,
+bridge state and Codex configuration. Failed or partially cleaned gray runs
+cannot authorize fleet deployment. Publication refuses existing tags/releases
+and uploads only the frozen archive tested on QDSPC; it does not rebuild or
+replace an existing asset.
+
 ## Supported versions
 
 Only the latest published release is actively supported.

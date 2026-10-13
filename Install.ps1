@@ -20,6 +20,8 @@ param(
     [string]$LogPath = (Join-Path $env:USERPROFILE '.codex\log\codex-worktree-trust-bridge.log'),
     [string]$BackupRoot = (Join-Path $env:USERPROFILE '.codex\backups\codex-worktree-trust-bridge\maintenance'),
     [switch]$DevelopmentTest,
+    [switch]$CanaryDeployment,
+    [string]$GrayAuthorizationPath,
     [string]$TestRoot,
     [ValidateRange(5, 180)][int]$TimeoutSeconds = 60
 )
@@ -64,6 +66,17 @@ $freshConfiguration = [ordered]@{
     uiPollIntervalMs = 750
     reconcileIntervalSeconds = 60
     discoveryDepth = 4
+    reconcileTimeoutSeconds = 30
+    discoveryDirectoryLimit = 5000
+    discoveryRepositoryLimit = 256
+    discoveryWorktreeLimit = 1024
+    gitCommandLimitPerReconcile = 2048
+    gitCommandTimeoutSeconds = 10
+    gitCleanupTimeoutSeconds = 5
+    gitMaximumStandardOutputBytes = 262144
+    gitMaximumStandardErrorBytes = 65536
+    gitJobMemoryMiB = 128
+    gitProcessLimit = 8
     trustMode = $TrustMode
     deniedDialogAction = $DeniedDialogAction
     deniedDialogGraceSeconds = $DeniedDialogGraceSeconds
@@ -75,5 +88,6 @@ $freshConfiguration = [ordered]@{
 $result = Invoke-BridgeInstall -ArtifactDirectory $ArtifactDirectory -Layout $layout `
     -PwshPath ((Get-Command pwsh.exe -ErrorAction Stop).Source) `
     -FreshConfiguration $freshConfiguration -DevelopmentTest:$DevelopmentTest `
+    -CanaryDeployment:$CanaryDeployment -GrayAuthorizationPath $GrayAuthorizationPath `
     -TestRoot $TestRoot -TimeoutSeconds $TimeoutSeconds
 $result | ConvertTo-Json -Depth 20

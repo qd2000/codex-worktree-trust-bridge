@@ -25,7 +25,8 @@ New-Item -ItemType Directory -Path $stage -Force | Out-Null
 try {
     $native = Join-Path $stage 'CodexWorktreeTrustBridge.Native.dll'
     & $compiler /nologo /target:library /platform:anycpu /optimize+ "/out:$native" `
-        (Join-Path $PSScriptRoot 'src\CodexWorktreeTrustBridge.Native.cs')
+        (Join-Path $PSScriptRoot 'src\CodexWorktreeTrustBridge.Native.cs') `
+        (Join-Path $PSScriptRoot 'src\CodexWorktreeTrustBridge.BoundedProcess.cs')
     if ($LASTEXITCODE) { throw "Native helper compilation failed: $LASTEXITCODE" }
 
     $launcher = Join-Path $stage 'CodexWorktreeTrustBridge.Launcher.exe'
@@ -60,6 +61,8 @@ try {
         'Stop.ps1' = 'Stop.ps1'
         'Stop.cmd' = 'Stop.cmd'
         'Status.ps1' = 'Status.ps1'
+        'Validate-Gray.ps1' = 'Validate-Gray.ps1'
+        'Validate-Gray.cmd' = 'Validate-Gray.cmd'
         'VERSION' = 'VERSION'
         'RELEASE_STATUS.json' = 'RELEASE_STATUS.json'
     }
@@ -73,9 +76,14 @@ try {
     if ($LASTEXITCODE) { throw 'Cannot identify source commit.' }
     $dirty = [bool]@(& git -C $PSScriptRoot status --porcelain)
     if ($LASTEXITCODE) { throw 'Cannot inspect source state.' }
+    $releaseStatus = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'RELEASE_STATUS.json') -Raw | ConvertFrom-Json
+    $accepted = -not $dirty -and [bool]$releaseStatus.candidateAccepted -and
+        [bool]$releaseStatus.maintenanceImplementationReady -and
+        [bool]$releaseStatus.gitReconcileImplementationReady -and
+        [bool]$releaseStatus.canaryDeploymentAllowed
     $sourcePaths = @('Build.ps1', 'VERSION', 'RELEASE_STATUS.json', 'Install.ps1', 'Install.cmd',
         'Uninstall.ps1', 'Uninstall.cmd', 'Rollback.ps1', 'Rollback.cmd', 'Backup.ps1', 'Backup.cmd',
-        'Stop.ps1', 'Stop.cmd', 'Status.ps1') +
+        'Stop.ps1', 'Stop.cmd', 'Status.ps1', 'Validate-Gray.ps1', 'Validate-Gray.cmd') +
         @(Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'src') -File |
             Sort-Object Name | ForEach-Object { 'src/' + $_.Name })
     $sources = @($sourcePaths | Sort-Object -Unique | ForEach-Object { [ordered]@{
@@ -94,7 +102,7 @@ try {
         sourceDirty = $dirty
         workerBuilt = $true
         maintenanceBuilt = $true
-        accepted = $false
+        accepted = $accepted
         builtAtUtc = [DateTime]::UtcNow.ToString('o')
         compilerSha256 = (Get-FileHash -LiteralPath $compiler -Algorithm SHA256).Hash.ToLowerInvariant()
         sources = $sources
@@ -123,7 +131,7 @@ try {
         WorkerBuilt = $true
         MaintenanceBuilt = $true
         SourceDirty = $dirty
-        Accepted = $false
+        Accepted = $accepted
         SourceCommit = $commit
         ArtifactCount = $artifacts.Count
     } | ConvertTo-Json

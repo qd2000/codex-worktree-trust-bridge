@@ -35,13 +35,27 @@ The project follows semantic versioning.
 - Add an isolated eleven-case maintenance matrix covering corrupt artifacts,
   ambiguous identity, v0.2.1 residual cleanup, status degradation, crashes,
   explicit/automatic rollback, concurrent edits and fresh install/uninstall.
+- Replace unbounded Git `WaitForExit`/`ReadToEndAsync` execution with an atomic
+  Job-owned process runner, bounded output files, strict UTF-8, time, memory,
+  process-count and cleanup limits.
+- Make reconcile transactional and deadline/budget bounded. Incomplete Git or
+  discovery results preserve the prior trust state and force unhealthy status.
+- Add twelve Git/reconcile fault and resource cases, including hanging
+  descendants, output limits, malformed output, discovery budgets and 100
+  repeated reconciles with memory/handle slope checks.
+- Add clean-candidate freeze receipts, a QDSPC-only two-hour gray validator and
+  exact-manifest authorization required before Local/T113 deployment.
+- Add non-clobbering publication of the previously frozen ZIP after QDSPC gray
+  authorization; GitHub does not rebuild the tested asset.
 
-### Remaining release blockers
+### Remaining operational gates
 
-- Git/reconcile-only resource comparison and at least two continuous hours of
-  representative gray observation against a frozen final artifact are pending.
-- A single accepted binary artifact must be used by the release and all hosts.
-  No tag, GitHub release, candidate installation or fleet rollout is claimed.
+- A clean complete suite must pass and exactly one candidate archive must be
+  frozen. Focused test passes do not authorize deployment.
+- QDSPC must then pass at least two continuous representative hours against that
+  exact manifest. Failure requires QDSPC rollback and stops expansion.
+- Local and T113 may be upgraded sequentially only with the QDSPC gray receipt.
+  No tag, GitHub release or production rollout is claimed by these source changes.
 
 ## [0.2.1] - 2026-10-06
 

@@ -333,7 +333,10 @@ function Write-BridgeHealth {
         $Ui.Reason = 'Authority runtime exceeded its resource guard; UI actions are disabled without restarting the bridge.'
         Write-BridgeLog -Event 'RESOURCE_DEGRADED' -Data @{ parent = $resource; state = $Ui.State }
     }
-    $healthy = $LastReconcileSucceeded -and $Ui.State -in @('HEALTHY', 'IDLE', 'DISABLED') -and -not $uncertain -and $resourceHealthy -and -not $ConfigWriteUncertain
+    $gitHealthy = $GitMetrics.activeCount -eq 0 -and $GitMetrics.lastCleanupVerified
+    $healthy = $LastReconcileSucceeded -and -not $ReconcileInProgress -and $gitHealthy -and
+        $Ui.State -in @('HEALTHY', 'IDLE', 'DISABLED') -and -not $uncertain -and
+        $resourceHealthy -and -not $ConfigWriteUncertain
     Write-AtomicBridgeJson -Path "$ConfigPath.health.json" -Value @{
         schema = 'codex-worktree-trust-bridge.health'; version = 1; updatedAtUtc = [DateTime]::UtcNow.ToString('o')
         packageVersion = $PackageVersion; runId = $env:CODEX_WORKTREE_TRUST_BRIDGE_RUN_ID
@@ -342,6 +345,27 @@ function Write-BridgeHealth {
         resourceHealthy = $resourceHealthy; uncertainUiOutcome = $uncertain
         configWriteUncertain = $ConfigWriteUncertain
         reconcileCount = $ReconcileCount; lastReconcileSucceeded = $LastReconcileSucceeded
+        reconcile = @{
+            inProgress = $ReconcileInProgress; lastStartedUtc = $LastReconcileStartedUtc
+            lastDurationMs = $LastReconcileDurationMs; lastFailure = $LastReconcileFailure
+            timeoutSeconds = $ReconcileTimeoutSeconds; lastBudget = $ReconcileBudget
+        }
+        git = @{
+            healthy = $gitHealthy; commandCount = $GitMetrics.commandCount
+            failureCount = $GitMetrics.failureCount; timeoutCount = $GitMetrics.timeoutCount
+            outputLimitCount = $GitMetrics.outputLimitCount; invalidUtf8Count = $GitMetrics.invalidUtf8Count
+            cleanupFailureCount = $GitMetrics.cleanupFailureCount; activeCount = $GitMetrics.activeCount
+            lastDurationMs = $GitMetrics.lastDurationMs; maximumDurationMs = $GitMetrics.maximumDurationMs
+            lastExitCode = $GitMetrics.lastExitCode; lastFailureKind = $GitMetrics.lastFailureKind
+            lastFailure = $GitMetrics.lastFailure; lastFailureUtc = $GitMetrics.lastFailureUtc
+            lastCleanupVerified = $GitMetrics.lastCleanupVerified
+            peakJobMemoryBytes = $GitMetrics.peakJobMemoryBytes
+            maximumActiveProcesses = $GitMetrics.maximumActiveProcesses
+            timeoutMs = $GitCommandTimeoutMs; cleanupTimeoutMs = $GitCleanupTimeoutMs
+            maximumStandardOutputBytes = $GitMaximumStandardOutputBytes
+            maximumStandardErrorBytes = $GitMaximumStandardErrorBytes
+            jobMemoryMiB = $GitJobMemoryMiB; processLimit = $GitProcessLimit
+        }
         ui = @{
             state = $Ui.State; reason = $Ui.Reason; workerGeneration = $Ui.Generation; failureCount = $Ui.Failures
             scanCount = $Ui.ScanCount; lastScanUtc = $Ui.LastScanUtc

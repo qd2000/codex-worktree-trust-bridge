@@ -17,6 +17,13 @@ $SourceManifestHash = if (Test-Path -LiteralPath $manifestPath) { (Get-FileHash 
 $script:LastReconcileSucceeded = $false
 $script:ReconcileCount = 0
 $script:ConfigWriteUncertain = $false
+$script:LastReconcileDurationMs = 0L
+$script:LastReconcileFailure = $null
+$script:LastReconcileStartedUtc = $null
+$script:ReconcileInProgress = $false
+$script:ReconcileStopwatch = $null
+$script:ReconcileHadCriticalGitFailure = $false
+$script:ReconcileBudget = $null
 
 $NewBeginMarker = '# BEGIN CODEX WORKTREE TRUST BRIDGE'
 $NewEndMarker = '# END CODEX WORKTREE TRUST BRIDGE'
@@ -53,6 +60,21 @@ if ($BridgeConfig.schema -ne 'codex-worktree-trust-bridge.config' -or [int]$Brid
     throw "Unsupported bridge configuration: $ConfigPath"
 }
 
+function Get-BridgeBoundedInteger {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][int]$Default,
+        [Parameter(Mandatory = $true)][int]$Minimum,
+        [Parameter(Mandatory = $true)][int]$Maximum
+    )
+    $property = $BridgeConfig.PSObject.Properties[$Name]
+    $value = if ($null -eq $property) { $Default } else { [int]$property.Value }
+    if ($value -lt $Minimum -or $value -gt $Maximum) {
+        throw "Configuration '$Name' must be between $Minimum and $Maximum."
+    }
+    return $value
+}
+
 $AllowedRoots = @($BridgeConfig.allowedRoots | ForEach-Object { Get-CanonicalPath ([string]$_) } | Sort-Object -Unique)
 if (-not $AllowedRoots.Count) {
     throw 'At least one allowed root is required.'
@@ -61,6 +83,17 @@ if (-not $AllowedRoots.Count) {
 $UiPollIntervalMs = [Math]::Max(250, [Math]::Min(10000, [int]$BridgeConfig.uiPollIntervalMs))
 $ReconcileIntervalSeconds = [Math]::Max(5, [Math]::Min(3600, [int]$BridgeConfig.reconcileIntervalSeconds))
 $DiscoveryDepth = [Math]::Max(1, [Math]::Min(8, [int]$BridgeConfig.discoveryDepth))
+$GitCommandTimeoutMs = (Get-BridgeBoundedInteger -Name 'gitCommandTimeoutSeconds' -Default 10 -Minimum 1 -Maximum 60) * 1000
+$GitCleanupTimeoutMs = (Get-BridgeBoundedInteger -Name 'gitCleanupTimeoutSeconds' -Default 5 -Minimum 1 -Maximum 15) * 1000
+$GitMaximumStandardOutputBytes = Get-BridgeBoundedInteger -Name 'gitMaximumStandardOutputBytes' -Default 262144 -Minimum 4096 -Maximum 4194304
+$GitMaximumStandardErrorBytes = Get-BridgeBoundedInteger -Name 'gitMaximumStandardErrorBytes' -Default 65536 -Minimum 1024 -Maximum 1048576
+$GitJobMemoryMiB = Get-BridgeBoundedInteger -Name 'gitJobMemoryMiB' -Default 128 -Minimum 32 -Maximum 512
+$GitProcessLimit = Get-BridgeBoundedInteger -Name 'gitProcessLimit' -Default 8 -Minimum 1 -Maximum 32
+$ReconcileTimeoutSeconds = Get-BridgeBoundedInteger -Name 'reconcileTimeoutSeconds' -Default 30 -Minimum 5 -Maximum 300
+$DiscoveryDirectoryLimit = Get-BridgeBoundedInteger -Name 'discoveryDirectoryLimit' -Default 5000 -Minimum 100 -Maximum 50000
+$DiscoveryRepositoryLimit = Get-BridgeBoundedInteger -Name 'discoveryRepositoryLimit' -Default 256 -Minimum 1 -Maximum 4096
+$DiscoveryWorktreeLimit = Get-BridgeBoundedInteger -Name 'discoveryWorktreeLimit' -Default 1024 -Minimum 1 -Maximum 16384
+$GitCommandLimitPerReconcile = Get-BridgeBoundedInteger -Name 'gitCommandLimitPerReconcile' -Default 2048 -Minimum 8 -Maximum 32768
 $EnableConfigTrust = [bool]$BridgeConfig.enableConfigTrust
 $EnableUiAutoApprove = [bool]$BridgeConfig.enableUiAutoApprove
 $PruneMissingManagedEntries = [bool]$BridgeConfig.pruneMissingManagedEntries
@@ -103,6 +136,24 @@ $LogDirectory = Join-Path $CodexHome 'log'
 $LogPath = Join-Path $LogDirectory 'codex-worktree-trust-bridge.log'
 $BackupDirectory = Join-Path $CodexHome 'backups\codex-worktree-trust-bridge'
 $GitExecutable = (Get-Command git.exe -ErrorAction Stop).Source
+$NativeHelperPath = Join-Path $PSScriptRoot 'CodexWorktreeTrustBridge.Native.dll'
+if (-not (Test-Path -LiteralPath $NativeHelperPath -PathType Leaf)) {
+    $NativeHelperPath = Join-Path (Split-Path -Parent $PSScriptRoot) '.artifacts\bin\CodexWorktreeTrustBridge.Native.dll'
+}
+if (-not (Test-Path -LiteralPath $NativeHelperPath -PathType Leaf)) {
+    throw 'The bounded native process helper is missing.'
+}
+if (-not ('CodexTrustBridge.BoundedProcessRunner' -as [type])) { Add-Type -Path $NativeHelperPath }
+$env:GIT_TERMINAL_PROMPT = '0'
+$env:GCM_INTERACTIVE = 'Never'
+$env:GIT_OPTIONAL_LOCKS = '0'
+$script:GitMetrics = [ordered]@{
+    commandCount = 0L; failureCount = 0L; timeoutCount = 0L; outputLimitCount = 0L
+    invalidUtf8Count = 0L; cleanupFailureCount = 0L; activeCount = 0
+    lastDurationMs = 0L; maximumDurationMs = 0L; lastExitCode = $null
+    lastFailureKind = $null; lastFailure = $null; lastFailureUtc = $null
+    lastCleanupVerified = $true; peakJobMemoryBytes = 0L; maximumActiveProcesses = 0
+}
 $LauncherProcessId = if ($env:CODEX_WORKTREE_TRUST_BRIDGE_LAUNCHER_PID) {
     [int]$env:CODEX_WORKTREE_TRUST_BRIDGE_LAUNCHER_PID
 }
@@ -143,45 +194,83 @@ function Write-BridgeLog {
 function Invoke-GitLines {
     param(
         [Parameter(Mandatory = $true)][string]$WorkingDirectory,
-        [Parameter(Mandatory = $true)][string[]]$Arguments
+        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [switch]$Critical
     )
-    $startInfo = [Diagnostics.ProcessStartInfo]::new()
-    $startInfo.FileName = $GitExecutable
-    $startInfo.WorkingDirectory = $WorkingDirectory
-    $startInfo.UseShellExecute = $false
-    $startInfo.CreateNoWindow = $true
-    $startInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
-    $startInfo.RedirectStandardOutput = $true
-    $startInfo.RedirectStandardError = $true
-    [void]$startInfo.ArgumentList.Add('-C')
-    [void]$startInfo.ArgumentList.Add($WorkingDirectory)
-    foreach ($argument in $Arguments) {
-        [void]$startInfo.ArgumentList.Add($argument)
-    }
-
-    $process = [Diagnostics.Process]::new()
-    $process.StartInfo = $startInfo
-    try {
-        if (-not $process.Start()) {
-            throw 'git.exe did not start.'
+    if ($ReconcileInProgress) {
+        Assert-ReconcileBudget
+        if ($ReconcileBudget.gitCommands -ge $GitCommandLimitPerReconcile) {
+            $script:ReconcileHadCriticalGitFailure = $true
+            throw "Git command budget exceeded ($GitCommandLimitPerReconcile)."
         }
-        $outputTask = $process.StandardOutput.ReadToEndAsync()
-        $errorTask = $process.StandardError.ReadToEndAsync()
-        $process.WaitForExit()
-        $outputText = $outputTask.GetAwaiter().GetResult()
-        $errorText = $errorTask.GetAwaiter().GetResult().Trim()
-        $exitCode = $process.ExitCode
+        $script:ReconcileBudget.gitCommands++
+    }
+    $script:GitMetrics.commandCount++
+    $script:GitMetrics.activeCount++
+    $result = $null
+    try {
+        $boundedArguments = [Collections.Generic.List[string]]::new()
+        foreach ($argument in @('--no-optional-locks', '-c', 'core.pager=cat', '-c', 'color.ui=false', '-C', $WorkingDirectory)) {
+            $boundedArguments.Add($argument)
+        }
+        foreach ($argument in $Arguments) { $boundedArguments.Add($argument) }
+        $result = [CodexTrustBridge.BoundedProcessRunner]::Run(
+            $GitExecutable,
+            $boundedArguments.ToArray(),
+            $WorkingDirectory,
+            $GitCommandTimeoutMs,
+            $GitCleanupTimeoutMs,
+            $GitMaximumStandardOutputBytes,
+            $GitMaximumStandardErrorBytes,
+            [long]$GitJobMemoryMiB * 1MB,
+            $GitProcessLimit)
+        $script:GitMetrics.lastDurationMs = [long]$result.DurationMilliseconds
+        $script:GitMetrics.maximumDurationMs = [Math]::Max([long]$GitMetrics.maximumDurationMs, [long]$result.DurationMilliseconds)
+        $script:GitMetrics.lastExitCode = [int]$result.ExitCode
+        $script:GitMetrics.lastCleanupVerified = [bool]$result.CleanupVerified
+        $script:GitMetrics.peakJobMemoryBytes = [Math]::Max([long]$GitMetrics.peakJobMemoryBytes, [long]$result.PeakJobMemoryBytes)
+        $script:GitMetrics.maximumActiveProcesses = [Math]::Max([int]$GitMetrics.maximumActiveProcesses, [int]$result.MaximumActiveProcesses)
+
+        $kind = $null
+        if (-not $result.CleanupVerified) { $kind = 'cleanup'; $script:GitMetrics.cleanupFailureCount++ }
+        elseif ($result.TimedOut) { $kind = 'timeout'; $script:GitMetrics.timeoutCount++ }
+        elseif ($result.StandardOutputLimitExceeded -or $result.StandardErrorLimitExceeded) { $kind = 'output-limit'; $script:GitMetrics.outputLimitCount++ }
+        elseif ($result.InvalidUtf8) { $kind = 'invalid-utf8'; $script:GitMetrics.invalidUtf8Count++ }
+        elseif ($result.ExitCode -ne 0) { $kind = 'exit' }
+        if ($kind) {
+            $detail = if ([string]::IsNullOrWhiteSpace([string]$result.StandardError)) { '' } else { ([string]$result.StandardError).Trim() }
+            if ($detail.Length -gt 512) { $detail = $detail.Substring(0, 512) }
+            $message = "Git command failed ($kind, exit=$($result.ExitCode), durationMs=$($result.DurationMilliseconds))"
+            if ($detail) { $message += ": $detail" }
+            $script:GitMetrics.failureCount++
+            $script:GitMetrics.lastFailureKind = $kind
+            $script:GitMetrics.lastFailure = $message
+            $script:GitMetrics.lastFailureUtc = [DateTime]::UtcNow.ToString('o')
+            if ($ReconcileInProgress -and ($Critical -or $kind -ne 'exit')) {
+                $script:ReconcileHadCriticalGitFailure = $true
+            }
+            $exception = [InvalidOperationException]::new($message)
+            $exception.Data['GitFailureKind'] = $kind
+            throw $exception
+        }
+        if ($ReconcileInProgress) { Assert-ReconcileBudget }
+        if ([string]::IsNullOrEmpty([string]$result.StandardOutput)) { return @() }
+        return @(([string]$result.StandardOutput -split '\r?\n') | Where-Object { $_.Length -gt 0 })
+    }
+    catch {
+        if ($null -eq $result) {
+            $script:GitMetrics.failureCount++
+            $script:GitMetrics.lastFailureKind = 'start'
+            $script:GitMetrics.lastFailure = $_.Exception.Message
+            $script:GitMetrics.lastFailureUtc = [DateTime]::UtcNow.ToString('o')
+            $script:GitMetrics.lastCleanupVerified = $false
+            if ($ReconcileInProgress) { $script:ReconcileHadCriticalGitFailure = $true }
+        }
+        throw
     }
     finally {
-        $process.Dispose()
+        $script:GitMetrics.activeCount--
     }
-
-    if ($exitCode -ne 0) {
-        $detail = if ([string]::IsNullOrWhiteSpace($errorText)) { '' } else { ": $errorText" }
-        throw "git -C '$WorkingDirectory' $($Arguments -join ' ') failed with exit $exitCode$detail"
-    }
-    if ([string]::IsNullOrEmpty($outputText)) { return @() }
-    return @($outputText -split '\r?\n' | Where-Object { $_.Length -gt 0 })
 }
 
 function Test-AllowedPath {
@@ -244,12 +333,16 @@ function Test-RegisteredGitWorktree {
     if (-not $directoryValidation.Ok) { return $false }
     try {
         $canonical = $directoryValidation.Path
-        $top = (Invoke-GitLines -WorkingDirectory $canonical -Arguments @('rev-parse', '--show-toplevel') | Select-Object -First 1)
-        if (-not $top -or (Get-CanonicalPath $top) -ne $canonical) { return $false }
+        $topLines = @(Invoke-GitLines -WorkingDirectory $canonical -Arguments @('rev-parse', '--show-toplevel') -Critical:$ReconcileInProgress)
+        if ($topLines.Count -ne 1) { return $false }
+        $top = $topLines[0]
+        if (-not [IO.Path]::IsPathFullyQualified($top) -or (Get-CanonicalPath $top) -ne $canonical) { return $false }
         $registered = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-        foreach ($line in Invoke-GitLines -WorkingDirectory $canonical -Arguments @('worktree', 'list', '--porcelain')) {
+        foreach ($line in Invoke-GitLines -WorkingDirectory $canonical -Arguments @('worktree', 'list', '--porcelain') -Critical:$ReconcileInProgress) {
             if ($line -match '^worktree\s+(.+)$') {
-                [void]$registered.Add((Get-CanonicalPath $Matches[1].Trim()))
+                $candidate = $Matches[1].Trim()
+                if (-not [IO.Path]::IsPathFullyQualified($candidate)) { return $false }
+                [void]$registered.Add((Get-CanonicalPath $candidate))
             }
         }
         return $registered.Contains($canonical)
@@ -524,14 +617,25 @@ function Find-GitRoots {
         $queue = [Collections.Generic.Queue[object]]::new()
         $queue.Enqueue([pscustomobject]@{ Path = $allowedRoot; Depth = 0 })
         while ($queue.Count) {
+            Assert-ReconcileBudget
             $item = $queue.Dequeue()
+            $script:ReconcileBudget.directories++
+            if ($ReconcileBudget.directories -gt $DiscoveryDirectoryLimit) {
+                throw "Directory discovery budget exceeded ($DiscoveryDirectoryLimit)."
+            }
             $marker = Join-Path $item.Path '.git'
             if (Test-Path -LiteralPath $marker) {
+                $script:ReconcileBudget.repositories++
+                if ($ReconcileBudget.repositories -gt $DiscoveryRepositoryLimit) {
+                    throw "Repository discovery budget exceeded ($DiscoveryRepositoryLimit)."
+                }
                 [void]$results.Add((Get-CanonicalPath $item.Path))
                 continue
             }
             if ($item.Depth -ge $DiscoveryDepth) { continue }
-            foreach ($directory in Get-ChildItem -LiteralPath $item.Path -Directory -Force -ErrorAction SilentlyContinue) {
+            try { $children = @(Get-ChildItem -LiteralPath $item.Path -Directory -Force -ErrorAction Stop) }
+            catch { throw "Directory discovery failed at '$($item.Path)': $($_.Exception.Message)" }
+            foreach ($directory in $children) {
                 if ($excluded.Contains($directory.Name)) { continue }
                 if (($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
                 $queue.Enqueue([pscustomobject]@{ Path = $directory.FullName; Depth = $item.Depth + 1 })
@@ -546,31 +650,42 @@ function Discover-RegisteredWorktrees {
     $gitRoots = Find-GitRoots
     $seenCommonDirectories = New-PathSet
     foreach ($gitRoot in $gitRoots) {
-        try {
-            $commonDirectory = (Invoke-GitLines -WorkingDirectory $gitRoot -Arguments @('rev-parse', '--git-common-dir') | Select-Object -First 1)
-            if (-not [IO.Path]::IsPathFullyQualified($commonDirectory)) {
-                $commonDirectory = Join-Path $gitRoot $commonDirectory
-            }
-            $commonKey = Get-CanonicalPath $commonDirectory
-            if (-not $seenCommonDirectories.Add($commonKey)) { continue }
-            foreach ($line in Invoke-GitLines -WorkingDirectory $gitRoot -Arguments @('worktree', 'list', '--porcelain')) {
-                if ($line -notmatch '^worktree\s+(.+)$') { continue }
-                $path = Get-CanonicalPath $Matches[1].Trim()
-                if (Test-RegisteredGitWorktree $path) {
-                    [void]$result.Add($path)
-                }
-                else {
-                    Write-BridgeLog -Event 'GIT_WORKTREE_SKIPPED' -Data @{
-                        path = $path
-                        reason = 'registered path failed exact Git root/worktree validation'
-                    }
-                }
-            }
+        Assert-ReconcileBudget
+        $commonLines = @(Invoke-GitLines -WorkingDirectory $gitRoot -Arguments @('rev-parse', '--git-common-dir') -Critical)
+        if ($commonLines.Count -ne 1 -or [string]::IsNullOrWhiteSpace($commonLines[0])) {
+            $script:ReconcileHadCriticalGitFailure = $true
+            throw "Git common-directory output is malformed for '$gitRoot'."
         }
-        catch {
-            Write-BridgeLog -Event 'GIT_DISCOVERY_ERROR' -Data @{ root = $gitRoot; error = $_.Exception.Message }
+        $commonDirectory = $commonLines[0]
+        if (-not [IO.Path]::IsPathFullyQualified($commonDirectory)) {
+            $commonDirectory = Join-Path $gitRoot $commonDirectory
+        }
+        $commonKey = Get-CanonicalPath $commonDirectory
+        if (-not $seenCommonDirectories.Add($commonKey)) { continue }
+        foreach ($line in Invoke-GitLines -WorkingDirectory $gitRoot -Arguments @('worktree', 'list', '--porcelain') -Critical) {
+            if ($line -notmatch '^worktree\s+(.+)$') { continue }
+            $script:ReconcileBudget.worktrees++
+            if ($ReconcileBudget.worktrees -gt $DiscoveryWorktreeLimit) {
+                throw "Worktree discovery budget exceeded ($DiscoveryWorktreeLimit)."
+            }
+            $candidate = $Matches[1].Trim()
+            if (-not [IO.Path]::IsPathFullyQualified($candidate)) {
+                $script:ReconcileHadCriticalGitFailure = $true
+                throw "Git returned a non-absolute worktree path for '$gitRoot'."
+            }
+            $path = Get-CanonicalPath $candidate
+            if (Test-RegisteredGitWorktree $path) {
+                [void]$result.Add($path)
+            }
+            else {
+                Write-BridgeLog -Event 'GIT_WORKTREE_SKIPPED' -Data @{
+                    path = $path
+                    reason = 'registered path failed exact Git root/worktree validation'
+                }
+            }
         }
     }
+    if ($ReconcileHadCriticalGitFailure) { throw 'Git discovery was incomplete; previous managed state is preserved.' }
     return ,$result
 }
 
@@ -598,29 +713,65 @@ function Import-LegacyManagedPaths {
 }
 
 function Invoke-Reconcile {
+    if ($ReconcileInProgress) { throw 'A reconcile run is already active.' }
+    $script:ReconcileInProgress = $true
     $script:LastReconcileSucceeded = $false
-    $discovered = Discover-RegisteredWorktrees
-    $nextManagedPaths = New-PathSet
-    foreach ($path in $discovered) { [void]$nextManagedPaths.Add($path) }
-    foreach ($path in @($ManagedPaths)) {
-        $validation = Test-TrustEligiblePath $path
-        if ($validation.Ok) {
-            [void]$nextManagedPaths.Add($validation.Path)
-            continue
+    $script:LastReconcileFailure = $null
+    $script:LastReconcileStartedUtc = [DateTime]::UtcNow.ToString('o')
+    $script:ReconcileStopwatch = [Diagnostics.Stopwatch]::StartNew()
+    $script:ReconcileHadCriticalGitFailure = $false
+    $script:ReconcileBudget = [ordered]@{ directories = 0; repositories = 0; worktrees = 0; gitCommands = 0 }
+    try {
+        $discovered = Discover-RegisteredWorktrees
+        $nextManagedPaths = New-PathSet
+        foreach ($path in $discovered) { [void]$nextManagedPaths.Add($path) }
+        foreach ($path in @($ManagedPaths)) {
+            Assert-ReconcileBudget
+            $validation = Test-TrustEligiblePath $path
+            if ($validation.Ok) {
+                [void]$nextManagedPaths.Add($validation.Path)
+                continue
+            }
+        }
+        Assert-ReconcileBudget
+        if ($ReconcileHadCriticalGitFailure) { throw 'Git validation was incomplete; previous managed state is preserved.' }
+        Update-CodexTrustConfig $nextManagedPaths
+        Save-ManagedState $nextManagedPaths
+        $ManagedPaths.Clear()
+        foreach ($path in $nextManagedPaths) { [void]$ManagedPaths.Add($path) }
+        $script:LastReconcileSucceeded = $true
+        $script:ReconcileCount++
+        Write-BridgeLog -Event 'RECONCILED' -Data @{
+            pid = $PID
+            launcherPid = $LauncherProcessId
+            managedCount = $ManagedPaths.Count
+            roots = $AllowedRoots
+            trustMode = $TrustMode
+            durationMs = $ReconcileStopwatch.ElapsedMilliseconds
+            budget = $ReconcileBudget
         }
     }
-    $ManagedPaths.Clear()
-    foreach ($path in $nextManagedPaths) { [void]$ManagedPaths.Add($path) }
-    Update-CodexTrustConfig $ManagedPaths
-    Save-ManagedState $ManagedPaths
-    $script:LastReconcileSucceeded = $true
-    $script:ReconcileCount++
-    Write-BridgeLog -Event 'RECONCILED' -Data @{
-        pid = $PID
-        launcherPid = $LauncherProcessId
-        managedCount = $ManagedPaths.Count
-        roots = $AllowedRoots
-        trustMode = $TrustMode
+    catch {
+        $script:LastReconcileFailure = $_.Exception.Message
+        Write-BridgeLog -Event 'RECONCILE_FAILED' -Data @{
+            error = $_.Exception.Message
+            durationMs = $ReconcileStopwatch.ElapsedMilliseconds
+            budget = $ReconcileBudget
+            previousManagedCount = $ManagedPaths.Count
+        }
+        throw
+    }
+    finally {
+        $script:LastReconcileDurationMs = $ReconcileStopwatch.ElapsedMilliseconds
+        $script:ReconcileInProgress = $false
+    }
+}
+
+function Assert-ReconcileBudget {
+    if (-not $ReconcileInProgress -or $null -eq $ReconcileStopwatch) { return }
+    if ($ReconcileStopwatch.Elapsed.TotalSeconds -ge $ReconcileTimeoutSeconds) {
+        $script:ReconcileHadCriticalGitFailure = $true
+        throw "Reconcile deadline exceeded ($ReconcileTimeoutSeconds seconds)."
     }
 }
 
@@ -657,6 +808,10 @@ try {
         once = [bool]$Once
         uiPollIntervalMs = $UiPollIntervalMs
         reconcileIntervalSeconds = $ReconcileIntervalSeconds
+        reconcileTimeoutSeconds = $ReconcileTimeoutSeconds
+        gitCommandTimeoutMs = $GitCommandTimeoutMs
+        gitMaximumStandardOutputBytes = $GitMaximumStandardOutputBytes
+        gitMaximumStandardErrorBytes = $GitMaximumStandardErrorBytes
         trustMode = $TrustMode
         deniedDialogAction = $DeniedDialogAction
         deniedDialogGraceSeconds = $DeniedDialogGraceSeconds

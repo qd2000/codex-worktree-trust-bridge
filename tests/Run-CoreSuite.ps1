@@ -19,6 +19,8 @@ $tests = @(
     @{ Path = 'tests\UiWorkerSmoke.ps1'; Seconds = 180; MemoryMiB = 512 },
     @{ Path = 'tests\WorkerFaults.ps1'; Seconds = 180; MemoryMiB = 512 },
     @{ Path = 'tests\AuthorityIntegration.ps1'; Seconds = 180; MemoryMiB = 512 },
+    @{ Path = 'tests\GitReconcileBoundaries.ps1'; Seconds = 600; MemoryMiB = 768 },
+    @{ Path = 'tests\GrayAuthorizationSmoke.ps1'; Seconds = 180; MemoryMiB = 512 },
     @{ Path = 'tests\MaintenanceLifecycle.ps1'; Seconds = 600; MemoryMiB = 768 }
 )
 $receipts = [Collections.Generic.List[object]]::new()
@@ -59,7 +61,8 @@ $result = @{
     sustainedValidation = 'NOT_RUN'
     productionInstallation = 'NOT_RUN'
     releasePublication = 'NOT_RUN'
-    scope = 'isolated source/component/security/maintenance tests; not candidate, sustained, release or deployment acceptance'
+    gitReconcileAcceptance = 'ISOLATED_BOUNDED_GIT_RECONCILE_PASSED_WHEN_SUITE_PASSES'
+    scope = 'isolated source/component/security/Git-reconcile/maintenance tests; not sustained, release or deployment acceptance'
 }
 $json = $result | ConvertTo-Json -Depth 10
 [IO.File]::WriteAllText((Join-Path $suiteDirectory 'receipt.json'), $json, [Text.UTF8Encoding]::new($false))

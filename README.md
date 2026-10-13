@@ -1,11 +1,12 @@
 # Codex Worktree Trust Bridge
 
 > **v0.2.2 development branch — not a release or accepted production installation.**
-> Core resource/lifecycle changes and the exact-identity maintenance chain have
-> passed isolated tests. Production installation is still blocked by the
-> unaccepted artifact and release/deployment gates. The final Git/reconcile
-> resource work, representative two-hour gray run and release-artifact workflow
-> are not accepted yet. See
+> Core resource/lifecycle, exact-identity maintenance and bounded Git/reconcile
+> changes have passed focused isolated tests. A clean complete-suite build is the
+> next final-candidate gate. Only that byte-identical artifact may be installed
+> first on QDSPC. Local and T113 remain blocked until QDSPC completes the
+> representative two-hour gray authorization. GitHub publication remains blocked
+> until the same authorization accepts the frozen archive. See
 > [development progress](docs/v0.2.2-progress.md) and the
 > [frozen acceptance contract](docs/v0.2.2-acceptance.md), including the
 > [maintenance-chain contract](docs/v0.2.2-maintenance-acceptance.md).
@@ -289,10 +290,12 @@ and local configuration, and requires verified readiness. Startup failure
 automatically attempts rollback and reports both the original failure and the
 rollback result.
 
-The current development artifact has `accepted=false`, while release and
-deployment remain disabled in `RELEASE_STATUS.json`; therefore it cannot be used
-for production installation. Isolated maintenance tests use unique temporary task
-names and paths under `.artifacts`.
+The final-candidate build is accepted only when the checkout is clean and the
+candidate, maintenance and Git/reconcile implementation gates are true. Canary
+installation is limited to QDSPC. Fleet installation requires a separate
+`gray-authorization.json` that identifies the exact manifest/source, records at
+least two hours and 200 usable post-warm-up samples, and proves cleanup. Isolated
+maintenance tests use unique temporary task names and paths under `.artifacts`.
 
 An installation receipt can be rolled back with:
 
@@ -304,6 +307,36 @@ pwsh.exe -NoLogo -NoProfile -File .\Rollback.ps1 `
 Rollback verifies the backup, refuses to overwrite a bridge configuration that
 changed after installation, restores the original task and files, and merges the
 original managed Codex block without removing unrelated later edits.
+
+## Candidate freeze and QDSPC gray validation
+
+After a clean complete suite, freeze the exact candidate without rebuilding:
+
+```powershell
+pwsh.exe -NoLogo -NoProfile -File .\tools\Freeze-Candidate.ps1 `
+  -SuiteReceiptPath <complete-suite-receipt.json>
+```
+
+The freeze receipt records the source commit and manifest/ZIP SHA-256. QDSPC is
+installed with `Install.ps1 -CanaryDeployment` using that frozen directory. Its
+installation receipt is then supplied to:
+
+```powershell
+pwsh.exe -NoLogo -NoProfile -File .\Validate-Gray.ps1 `
+  -InstallReceiptPath <qdspc-install-receipt.json>
+```
+
+The validator runs in the foreground for at least two hours. It samples exact
+launcher/runtime/descendant identities, memory, handles, managed heap,
+Git/reconcile and UI activity every 30 seconds or less. It also changes controlled
+worktree topology beneath one existing allowed root. Fleet authorization is
+emitted only after the controlled repository is removed and two later reconciles
+prove its paths absent from bridge state and Codex configuration. Failure creates
+a non-authorizing receipt and the canary must be rolled back.
+
+Only a passing QDSPC receipt can unlock the exact frozen artifact for Local and
+then T113. `tools\Publish-FrozenCandidate.ps1` refuses existing tags/releases and
+uploads the previously frozen ZIP without rebuilding or replacing an asset.
 
 ## Privacy and data handling
 
@@ -381,19 +414,20 @@ See [SECURITY.md](SECURITY.md) for vulnerability-reporting guidance.
 
 ## Development and verification
 
-For this **unreleased v0.2.2 branch**, use the finite, isolated core suite:
+For this **unreleased v0.2.2 branch**, use the finite, isolated complete suite:
 
 ```powershell
 pwsh.exe -NoLogo -NoProfile -File .\Build.ps1
 pwsh.exe -NoLogo -NoProfile -File .\tests\Run-CoreSuite.ps1
 ```
 
-It keeps raw output, resource samples, artifact hashes and verified job-cleanup
+It includes bounded Git/reconcile fault/resource and gray-authorization tests,
+and keeps raw output, resource samples, artifact hashes and verified job-cleanup
 receipts under ignored `.artifacts`. The controlled UI fixtures do not modify
 the user's Codex trust configuration or click business dialogs. The maintenance
 group uses unique temporary Scheduled Tasks and verifies that the production task,
-process creation identities and hashes are unchanged. A core-suite pass is not a
-production installation, two-hour stability, release or deployment acceptance.
+process creation identities and hashes are unchanged. A complete-suite pass is
+not QDSPC installation, two-hour stability, fleet rollout or publication.
 See `docs/v0.2.2-progress.md` for the remaining gates and evidence scope.
 
 Parse all PowerShell files:
@@ -429,10 +463,10 @@ pwsh.exe -NoLogo -NoProfile -File .\tests\Run-Bounded.ps1 `
 ## Releases
 
 Version tags use `vMAJOR.MINOR.PATCH`. This development branch's workflow refuses
-publication: no accepted binary artifact or two-hour gray receipt exists yet.
-The replacement release flow must publish the exact accepted artifact without
-overwriting an existing tag or asset. Do not push a release tag to bypass the
-blocked install, maintenance, or sustained-validation gates.
+automatic publication. After QDSPC gray authorization, the explicit publication
+tool verifies tag/release absence and uploads the exact frozen archive without
+overwriting or rebuilding. Do not push a release tag to bypass the candidate,
+canary, cleanup or sustained-validation gates.
 
 See [CHANGELOG.md](CHANGELOG.md) for release notes.
 

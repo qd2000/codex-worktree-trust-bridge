@@ -240,7 +240,9 @@ function Test-BridgeArtifactDirectory {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$ArtifactDirectory,
-        [switch]$DevelopmentTest
+        [switch]$DevelopmentTest,
+        [switch]$CanaryDeployment,
+        [string]$GrayAuthorizationPath
     )
     $directory = ConvertTo-BridgeCanonicalPath $ArtifactDirectory
     if (-not (Test-Path -LiteralPath $directory -PathType Container)) { throw "Artifact directory is missing: $directory" }
@@ -274,24 +276,63 @@ function Test-BridgeArtifactDirectory {
     if (-not (Test-Path -LiteralPath $versionPath -PathType Leaf)) { throw 'VERSION is absent from the artifact.' }
     $version = (Get-Content -LiteralPath $versionPath -Raw).Trim()
     if ($version -cne [string]$manifest.packageVersion) { throw 'VERSION and artifact manifest disagree.' }
+    $manifestSha256 = Get-BridgeFileHash $manifestPath
+    $deploymentMode = if ($DevelopmentTest) { 'development-test' } elseif ($CanaryDeployment) { 'canary' } else { 'fleet' }
+    $grayAuthorizationSha256 = $null
     if (-not $DevelopmentTest) {
         if ([bool]$manifest.sourceDirty -or -not [bool]$manifest.accepted) {
             throw 'Production installation requires a clean accepted artifact.'
         }
         $releaseStatusPath = Join-Path $directory 'RELEASE_STATUS.json'
         $releaseStatus = Read-BridgeJson -Path $releaseStatusPath -MaximumBytes 65536
-        if (-not [bool]$releaseStatus.releaseAllowed -or -not [bool]$releaseStatus.deploymentAllowed -or
-            -not [bool]$releaseStatus.maintenanceImplementationReady) {
-            throw 'Production installation remains blocked by release/deployment status.'
+        if (-not [bool]$releaseStatus.maintenanceImplementationReady -or
+            -not [bool]$releaseStatus.gitReconcileImplementationReady -or
+            -not [bool]$releaseStatus.candidateAccepted) {
+            throw 'Production installation remains blocked because the candidate implementation is not accepted.'
+        }
+        if ($CanaryDeployment) {
+            if (-not [bool]$releaseStatus.canaryDeploymentAllowed) {
+                throw 'Canary deployment is not authorized by candidate status.'
+            }
+            if (-not [string]::IsNullOrWhiteSpace($GrayAuthorizationPath)) {
+                throw 'Canary deployment must not consume a fleet gray authorization.'
+            }
+        }
+        else {
+            if (-not [bool]$releaseStatus.fleetDeploymentRequiresGrayAuthorization) {
+                throw 'Fleet deployment policy is missing its gray-authorization requirement.'
+            }
+            if ([string]::IsNullOrWhiteSpace($GrayAuthorizationPath)) {
+                throw 'Fleet deployment requires the qdspc gray-authorization receipt.'
+            }
+            $grayPath = ConvertTo-BridgeCanonicalPath $GrayAuthorizationPath
+            $gray = Read-BridgeJson -Path $grayPath -MaximumBytes 1048576
+            if ($gray.schema -ne 'codex-worktree-trust-bridge.gray-authorization' -or [int]$gray.version -ne 1 -or
+                -not [bool]$gray.passed -or -not [bool]$gray.fleetDeploymentAllowed -or
+                -not [bool]$gray.qdspcCanaryPassed -or -not [bool]$gray.cleanupVerified -or
+                [string]$gray.hostName -ine 'QDSPC' -or -not [bool]$gray.resourceGatePassed -or
+                -not [bool]$gray.activityGatePassed -or -not [bool]$gray.integrityGatePassed -or
+                [double]$gray.durationSeconds -lt 7200 -or [int]$gray.usableSamples -lt 200 -or
+                [string]$gray.candidateManifestSha256 -cne $manifestSha256 -or
+                [string]$gray.sourceCommit -cne [string]$manifest.sourceCommit) {
+                throw 'Fleet gray authorization does not accept this exact candidate artifact.'
+            }
+            $grayCreated = [DateTimeOffset]::Parse([string]$gray.createdAtUtc)
+            if ($grayCreated -gt [DateTimeOffset]::UtcNow.AddMinutes(5)) {
+                throw 'Fleet gray authorization has an invalid future timestamp.'
+            }
+            $grayAuthorizationSha256 = Get-BridgeFileHash $grayPath
         }
     }
     return [pscustomobject]@{
         Directory = $directory
         Manifest = $manifest
         ManifestPath = $manifestPath
-        ManifestSha256 = Get-BridgeFileHash $manifestPath
+        ManifestSha256 = $manifestSha256
         Version = $version
         Entries = $entries
+        DeploymentMode = $deploymentMode
+        GrayAuthorizationSha256 = $grayAuthorizationSha256
     }
 }
 
@@ -1146,11 +1187,14 @@ function Invoke-BridgeInstall {
         [Parameter(Mandatory)][string]$PwshPath,
         [hashtable]$FreshConfiguration,
         [switch]$DevelopmentTest,
+        [switch]$CanaryDeployment,
+        [string]$GrayAuthorizationPath,
         [string]$TestRoot,
         [ValidateRange(1, 180)][int]$TimeoutSeconds = 60
     )
     Assert-BridgeMaintenanceScope -Layout $Layout -DevelopmentTest:$DevelopmentTest -TestRoot $TestRoot
-    $artifact = Test-BridgeArtifactDirectory -ArtifactDirectory $ArtifactDirectory -DevelopmentTest:$DevelopmentTest
+    $artifact = Test-BridgeArtifactDirectory -ArtifactDirectory $ArtifactDirectory -DevelopmentTest:$DevelopmentTest `
+        -CanaryDeployment:$CanaryDeployment -GrayAuthorizationPath $GrayAuthorizationPath
     $pwsh = ConvertTo-BridgeCanonicalPath $PwshPath
     if (-not (Test-Path -LiteralPath $pwsh -PathType Leaf)) { throw "PowerShell executable is missing: $pwsh" }
     $backup = New-BridgeQuiescedBackup -Layout $Layout
@@ -1200,6 +1244,8 @@ function Invoke-BridgeInstall {
                 sourceCommit = [string]$artifact.Manifest.sourceCommit
                 sourceDirty = [bool]$artifact.Manifest.sourceDirty
                 accepted = [bool]$artifact.Manifest.accepted
+                deploymentMode = $artifact.DeploymentMode
+                grayAuthorizationSha256 = $artifact.GrayAuthorizationSha256
             }
             postInstall = [ordered]@{
                 bridgeConfigExisted = $postInstallConfigExists
