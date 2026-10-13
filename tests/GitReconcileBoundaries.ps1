@@ -56,7 +56,11 @@ try {
         allowedRoots = @($allowedRoot, $treeRoot); uiPollIntervalMs = 750
         reconcileIntervalSeconds = 60; discoveryDepth = 2; reconcileTimeoutSeconds = 10
         discoveryDirectoryLimit = 100; discoveryRepositoryLimit = 2; discoveryWorktreeLimit = 4
-        gitCommandLimitPerReconcile = 64; gitCommandTimeoutSeconds = 1; gitCleanupTimeoutSeconds = 3
+        # Keep the fixture timeout well below production's 10-second default,
+        # but leave scheduler headroom for normal short-lived fake Git commands
+        # when the complete suite is under load. The controlled hang still
+        # exceeds this bound and must fail closed.
+        gitCommandLimitPerReconcile = 64; gitCommandTimeoutSeconds = 3; gitCleanupTimeoutSeconds = 3
         gitMaximumStandardOutputBytes = 4096; gitMaximumStandardErrorBytes = 4096
         gitJobMemoryMiB = 64; gitProcessLimit = 4
         trustMode = 'git-only'; deniedDialogAction = 'leave-open'; deniedDialogGraceSeconds = 3
