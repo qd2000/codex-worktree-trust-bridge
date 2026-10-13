@@ -65,6 +65,28 @@ foreach ($required in @('ls-remote --tags', 'release view', 'release create', '-
 }
 
 . (Join-Path $root 'src\CodexWorktreeTrustBridge.Maintenance.ps1')
+$syntheticRows = @(
+    [pscustomobject]@{ ProcessId = 200; ParentProcessId = 100; Birth = 900 },
+    [pscustomobject]@{ ProcessId = 201; ParentProcessId = 100; Birth = 1100 },
+    [pscustomobject]@{ ProcessId = 202; ParentProcessId = 201; Birth = 1200 },
+    [pscustomobject]@{ ProcessId = 203; ParentProcessId = 200; Birth = 1300 }
+)
+$syntheticRoot = [pscustomobject]@{ pid = 100; creationFileTimeUtc = 1000 }
+$syntheticResolver = {
+    param($Row)
+    [pscustomobject]@{
+        pid = [int]$Row.ProcessId
+        creationFileTimeUtc = [long]$Row.Birth
+        parentPid = [int]$Row.ParentProcessId
+        executablePath = 'C:\controlled.exe'
+    }
+}
+$selectedSynthetic = @(Get-BridgeVerifiedDescendantIdentities -AllProcesses $syntheticRows `
+    -RootIdentities @($syntheticRoot) -IdentityResolver $syntheticResolver)
+$selectedSyntheticPids = @($selectedSynthetic.pid | Sort-Object)
+if (($selectedSyntheticPids -join ',') -ne '201,202') {
+    throw "PID-reuse-safe descendant selection failed: $($selectedSyntheticPids -join ',')"
+}
 $artifact = Join-Path $root '.artifacts\bin'
 $manifest = Get-Content -LiteralPath (Join-Path $artifact 'manifest.json') -Raw | ConvertFrom-Json
 if (-not $manifest.sourceDirty -and -not $manifest.accepted) { throw 'Clean final candidate manifest is not accepted.' }
@@ -112,5 +134,6 @@ finally {
     releaseBlocked = $true
     authorityHasNoUia = $true
     boundedGitRunnerGuarded = $true
+    pidReuseSafeDescendantSelection = $true
     unsafeBroadProcessPatterns = 0
 } | ConvertTo-Json

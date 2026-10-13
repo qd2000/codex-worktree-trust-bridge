@@ -436,6 +436,47 @@ function ConvertTo-BridgeProcessIdentity {
     finally { if ($null -ne $process) { $process.Dispose() } }
 }
 
+function Get-BridgeVerifiedDescendantIdentities {
+    param(
+        [Parameter(Mandatory)][object[]]$AllProcesses,
+        [Parameter(Mandatory)][AllowNull()][AllowEmptyCollection()][object[]]$RootIdentities,
+        [scriptblock]$IdentityResolver
+    )
+    if ($null -eq $IdentityResolver) {
+        $IdentityResolver = {
+            param($Row)
+            ConvertTo-BridgeProcessIdentity -CimProcess $Row -Role descendant -AllowExited
+        }
+    }
+    $knownBirth = [Collections.Generic.Dictionary[int64, int64]]::new()
+    foreach ($rootIdentity in $RootIdentities) {
+        if ($null -ne $rootIdentity) {
+            $knownBirth[[int64]$rootIdentity.pid] = [int64]$rootIdentity.creationFileTimeUtc
+        }
+    }
+    $descendants = [Collections.Generic.List[object]]::new()
+    $changed = $true
+    while ($changed) {
+        $changed = $false
+        foreach ($row in $AllProcesses) {
+            $processId = [int64]$row.ProcessId
+            $parentPid = [int64]$row.ParentProcessId
+            if ($knownBirth.ContainsKey($processId) -or -not $knownBirth.ContainsKey($parentPid)) { continue }
+            $identity = & $IdentityResolver $row
+            if ($null -eq $identity) { continue }
+            if ([int64]$identity.creationFileTimeUtc -lt [int64]$knownBirth[$parentPid]) {
+                # The numeric ParentProcessId points at a newer process that reused
+                # an older parent's PID. This process is observed but never owned.
+                continue
+            }
+            $knownBirth[$processId] = [int64]$identity.creationFileTimeUtc
+            $descendants.Add($identity)
+            $changed = $true
+        }
+    }
+    return $descendants.ToArray()
+}
+
 function Get-BridgeProcessSet {
     [CmdletBinding()]
     param(
@@ -467,37 +508,21 @@ function Get-BridgeProcessSet {
     if (-not $AllowMissingPair -and [string]$Task.State -eq 'Running' -and ($null -eq $launcher -or $null -eq $runtime)) {
         throw 'Running task does not have one exact launcher/runtime process pair.'
     }
-    $descendantRows = [Collections.Generic.List[object]]::new()
-    if ($null -ne $launcher) {
-        $known = [Collections.Generic.HashSet[int]]::new()
-        [void]$known.Add([int]$launcher.ProcessId)
-        if ($null -ne $runtime) { [void]$known.Add([int]$runtime.ProcessId) }
-        $changed = $true
-        while ($changed) {
-            $changed = $false
-            foreach ($row in $all) {
-                if (-not $known.Contains([int]$row.ProcessId) -and $known.Contains([int]$row.ParentProcessId)) {
-                    [void]$known.Add([int]$row.ProcessId)
-                    $descendantRows.Add($row)
-                    $changed = $true
-                }
-            }
-        }
-    }
     $launcherIdentity = if ($launcher) {
         ConvertTo-BridgeProcessIdentity -CimProcess $launcher -Role launcher -AllowExited
     } else { $null }
     $runtimeIdentity = if ($runtime) {
         ConvertTo-BridgeProcessIdentity -CimProcess $runtime -Role runtime -AllowExited
     } else { $null }
-    $descendantIdentities = @($descendantRows | ForEach-Object {
-        $identity = ConvertTo-BridgeProcessIdentity -CimProcess $_ -Role descendant -AllowExited
-        if ($null -ne $identity) { $identity }
-    })
     if (-not $AllowMissingPair -and [string]$Task.State -eq 'Running' -and
         ($null -eq $launcherIdentity -or $null -eq $runtimeIdentity)) {
         throw 'The exact launcher/runtime pair exited while its identity was being captured.'
     }
+
+    # ParentProcessId alone is not an identity. Verify every edge with creation
+    # time so a stale orphan cannot be adopted after PID reuse.
+    $descendantIdentities = @(Get-BridgeVerifiedDescendantIdentities -AllProcesses $all `
+        -RootIdentities @($launcherIdentity, $runtimeIdentity))
     return [pscustomobject]@{
         Task = $Task
         Action = $action
