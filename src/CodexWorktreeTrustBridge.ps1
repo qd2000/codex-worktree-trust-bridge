@@ -89,7 +89,7 @@ $GitMaximumStandardOutputBytes = Get-BridgeBoundedInteger -Name 'gitMaximumStand
 $GitMaximumStandardErrorBytes = Get-BridgeBoundedInteger -Name 'gitMaximumStandardErrorBytes' -Default 65536 -Minimum 1024 -Maximum 1048576
 $GitJobMemoryMiB = Get-BridgeBoundedInteger -Name 'gitJobMemoryMiB' -Default 128 -Minimum 32 -Maximum 512
 $GitProcessLimit = Get-BridgeBoundedInteger -Name 'gitProcessLimit' -Default 8 -Minimum 1 -Maximum 32
-$ReconcileTimeoutSeconds = Get-BridgeBoundedInteger -Name 'reconcileTimeoutSeconds' -Default 30 -Minimum 5 -Maximum 300
+$ReconcileTimeoutSeconds = Get-BridgeBoundedInteger -Name 'reconcileTimeoutSeconds' -Default 120 -Minimum 5 -Maximum 300
 $DiscoveryDirectoryLimit = Get-BridgeBoundedInteger -Name 'discoveryDirectoryLimit' -Default 5000 -Minimum 100 -Maximum 50000
 $DiscoveryRepositoryLimit = Get-BridgeBoundedInteger -Name 'discoveryRepositoryLimit' -Default 256 -Minimum 1 -Maximum 4096
 $DiscoveryWorktreeLimit = Get-BridgeBoundedInteger -Name 'discoveryWorktreeLimit' -Default 1024 -Minimum 1 -Maximum 16384
@@ -147,6 +147,8 @@ if (-not ('CodexTrustBridge.BoundedProcessRunner' -as [type])) { Add-Type -Path 
 $env:GIT_TERMINAL_PROMPT = '0'
 $env:GCM_INTERACTIVE = 'Never'
 $env:GIT_OPTIONAL_LOCKS = '0'
+$env:LC_ALL = 'C'
+$env:LANG = 'C'
 $script:GitMetrics = [ordered]@{
     commandCount = 0L; failureCount = 0L; timeoutCount = 0L; outputLimitCount = 0L
     invalidUtf8Count = 0L; cleanupFailureCount = 0L; activeCount = 0
@@ -260,6 +262,8 @@ function Invoke-GitLines {
             }
             $exception = [InvalidOperationException]::new($message)
             $exception.Data['GitFailureKind'] = $kind
+            $exception.Data['GitExitCode'] = [int]$result.ExitCode
+            $exception.Data['GitStandardError'] = [string]$result.StandardError
             throw $exception
         }
         if ($ReconcileInProgress) { Assert-ReconcileBudget }
@@ -664,7 +668,30 @@ function Discover-RegisteredWorktrees {
     $seenCommonDirectories = New-PathSet
     foreach ($gitRoot in $gitRoots) {
         Assert-ReconcileBudget
-        $commonLines = @(Invoke-GitLines -WorkingDirectory $gitRoot -Arguments @('rev-parse', '--git-common-dir') -Critical)
+        try {
+            # Backups can contain a literal .git marker after the repository it
+            # pointed to has been removed. Skip only Git's deterministic
+            # "not a git repository" exit. Timeouts, output/protocol/cleanup
+            # failures and every other non-zero result remain critical and keep
+            # the previous managed state intact.
+            $commonLines = @(Invoke-GitLines -WorkingDirectory $gitRoot -Arguments @('rev-parse', '--git-common-dir'))
+        }
+        catch {
+            $kind = [string]$_.Exception.Data['GitFailureKind']
+            $exitCode = [int]$_.Exception.Data['GitExitCode']
+            $standardError = [string]$_.Exception.Data['GitStandardError']
+            $staleMarker = $kind -eq 'exit' -and $exitCode -eq 128 -and
+                $standardError -match '(?im)^fatal:\s+not a git repository(?:\s|:|\(|$)'
+            if ($staleMarker) {
+                Write-BridgeLog -Event 'GIT_ROOT_SKIPPED' -Data @{
+                    path = $gitRoot
+                    reason = 'stale or invalid .git marker is not a repository'
+                }
+                continue
+            }
+            $script:ReconcileHadCriticalGitFailure = $true
+            throw
+        }
         if ($commonLines.Count -ne 1 -or [string]::IsNullOrWhiteSpace($commonLines[0])) {
             $script:ReconcileHadCriticalGitFailure = $true
             throw "Git common-directory output is malformed for '$gitRoot'."

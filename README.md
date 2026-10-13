@@ -389,6 +389,15 @@ Check the `REFUSED` or `CANCELLED` record. Common reasons are:
 
 The bridge intentionally fails closed rather than clicking an unknown dialog.
 
+### Reconcile reports stale `.git` markers
+
+Archived or partially deleted project trees can retain a `.git` file or
+directory after they stop being repositories. v0.2.2 skips only Git's exact
+`not a git repository` exit for that discovery candidate and records
+`GIT_ROOT_SKIPPED`. Other Git failures still fail the whole reconcile without
+replacing the previous managed state. The default end-to-end reconcile deadline
+is 120 seconds and remains configurable up to its bounded maximum.
+
 ### Codex Desktop changed after an update
 
 Stop the bridge if the dialog structure has materially changed, open an issue

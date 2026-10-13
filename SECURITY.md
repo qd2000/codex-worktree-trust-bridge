@@ -51,6 +51,14 @@ There is no forced GC, working-set trimming or periodic whole-bridge restart.
 Private host logs, process command lines, trust configuration, and test artifacts
 remain local and must not be uploaded as public release assets.
 
+Git discovery treats a directory containing `.git` as a candidate, not proof of
+a repository. Only an exit-128 result whose C-locale stderr begins with Git's
+`fatal: not a git repository` diagnostic is classified as a stale marker and
+skipped. Timeout, output limit, invalid UTF-8, cleanup failure, start failure,
+malformed output, and every other non-zero exit remain critical: reconcile fails
+and the previous managed configuration is preserved. Skipping the stale marker
+does not broaden an allowed root or approve that path.
+
 Git commands are independently created inside a kill-on-close Job Object. Only
 the three standard handles are inherited. Stdout/stderr are captured in bounded
 temporary files and decoded with strict UTF-8; command time, cleanup time,

@@ -9,7 +9,7 @@
   "uiPollIntervalMs": 750,
   "reconcileIntervalSeconds": 60,
   "discoveryDepth": 4,
-  "reconcileTimeoutSeconds": 30,
+  "reconcileTimeoutSeconds": 120,
   "discoveryDirectoryLimit": 5000,
   "discoveryRepositoryLimit": 256,
   "discoveryWorktreeLimit": 1024,

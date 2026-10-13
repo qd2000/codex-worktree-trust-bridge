@@ -124,6 +124,14 @@ internal static class BoundedFakeGit
 
         string root = Path.GetFullPath(Env("CODEX_GIT_BOUNDARY_REPO"));
         string working = WorkingDirectory(args);
+        string stale = Environment.GetEnvironmentVariable("CODEX_GIT_BOUNDARY_STALE");
+        if (!String.IsNullOrWhiteSpace(stale) &&
+            String.Equals(Path.GetFullPath(stale), working, StringComparison.OrdinalIgnoreCase) &&
+            Has(args, "--git-common-dir"))
+        {
+            Console.Error.WriteLine("fatal: not a git repository: (NULL)");
+            return 128;
+        }
         if (Has(args, "--show-toplevel"))
         {
             Console.WriteLine(working);

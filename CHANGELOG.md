@@ -43,6 +43,11 @@ The project follows semantic versioning.
 - Add twelve Git/reconcile fault and resource cases, including hanging
   descendants, output limits, malformed output, discovery budgets and 100
   repeated reconciles with memory/handle slope checks.
+- Isolate stale backup `.git` markers only when Git deterministically reports
+  exit 128 with `not a git repository`; every other Git failure remains
+  reconcile-critical and preserves the previous managed state.
+- Raise the bounded default reconcile deadline from 30 to 120 seconds after a
+  real two-root host completed a read-only reconcile in about 87 seconds.
 - Add clean-candidate freeze receipts, a QDSPC-only two-hour gray validator and
   exact-manifest authorization required before Local/T113 deployment.
 - Add non-clobbering publication of the previously frozen ZIP after QDSPC gray
@@ -56,6 +61,9 @@ The project follows semantic versioning.
   exact manifest. Failure requires QDSPC rollback and stops expansion.
 - Local and T113 may be upgraded sequentially only with the QDSPC gray receipt.
   No tag, GitHub release or production rollout is claimed by these source changes.
+- The first frozen candidate was revoked after Local exposed stale `.git`
+  markers. Local's automatic rollback succeeded and T113 was not touched; a
+  replacement candidate and a new QDSPC gray authorization are required.
 
 ## [0.2.1] - 2026-10-06
 

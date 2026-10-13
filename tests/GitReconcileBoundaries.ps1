@@ -12,6 +12,7 @@ $codexHome = Join-Path $profile '.codex'
 $fakeBin = Join-Path $testRoot 'fake-bin'
 $allowedRoot = Join-Path $testRoot 'allowed'
 $repo = Join-Path $allowedRoot 'repo with spaces'
+$staleRepo = Join-Path $allowedRoot 'stale backup marker'
 $treeRoot = Join-Path $testRoot 'directory-budget-root'
 $configPath = Join-Path $profile 'bridge.json'
 $controlPath = Join-Path $testRoot 'mode.txt'
@@ -25,6 +26,7 @@ $oldPath = $env:PATH
 $oldControl = $env:CODEX_GIT_BOUNDARY_CONTROL
 $oldLog = $env:CODEX_GIT_BOUNDARY_LOG
 $oldRepo = $env:CODEX_GIT_BOUNDARY_REPO
+$oldStale = $env:CODEX_GIT_BOUNDARY_STALE
 $oldSamples = $env:CODEX_GIT_RESOURCE_SAMPLES
 $oldRunId = $env:CODEX_WORKTREE_TRUST_BRIDGE_RUN_ID
 
@@ -33,7 +35,7 @@ function Write-Mode([string]$Mode) {
 }
 
 try {
-    foreach ($directory in @($codexHome, $fakeBin, $allowedRoot, $repo, (Join-Path $repo '.git'), $treeRoot, $adapterDirectory)) {
+    foreach ($directory in @($codexHome, $fakeBin, $allowedRoot, $repo, (Join-Path $repo '.git'), $staleRepo, (Join-Path $staleRepo '.git'), $treeRoot, $adapterDirectory)) {
         New-Item -ItemType Directory -Path $directory -Force | Out-Null
     }
     Copy-Item -Path (Join-Path $root '.artifacts\bin\*') -Destination $adapterDirectory
@@ -53,7 +55,7 @@ try {
         schema = 'codex-worktree-trust-bridge.config'; version = 1
         allowedRoots = @($allowedRoot, $treeRoot); uiPollIntervalMs = 750
         reconcileIntervalSeconds = 60; discoveryDepth = 2; reconcileTimeoutSeconds = 10
-        discoveryDirectoryLimit = 100; discoveryRepositoryLimit = 1; discoveryWorktreeLimit = 4
+        discoveryDirectoryLimit = 100; discoveryRepositoryLimit = 2; discoveryWorktreeLimit = 4
         gitCommandLimitPerReconcile = 64; gitCommandTimeoutSeconds = 1; gitCleanupTimeoutSeconds = 3
         gitMaximumStandardOutputBytes = 4096; gitMaximumStandardErrorBytes = 4096
         gitJobMemoryMiB = 64; gitProcessLimit = 4
@@ -150,7 +152,11 @@ try {
     Write-BridgeHealth -Force
     $baselineHealth = Get-Content -LiteralPath "$ConfigPath.health.json" -Raw | ConvertFrom-Json
     if (-not $baselineHealth.healthy -or $ManagedPaths.Count -ne 1) { throw 'Baseline controlled reconcile was not healthy.' }
+    $staleEvents = @(Get-Content -LiteralPath $LogPath | ForEach-Object { try { $_ | ConvertFrom-Json } catch { } } |
+        Where-Object { $_.event -eq 'GIT_ROOT_SKIPPED' -and [string]$_.data.path -ieq $env:CODEX_GIT_BOUNDARY_STALE })
+    if ($staleEvents.Count -ne 1) { throw 'Stale .git marker was not isolated exactly once.' }
     $caseResults.Add(@{ case = 'normal discovery'; passed = $true; managedCount = $ManagedPaths.Count })
+    $caseResults.Add(@{ case = 'stale .git marker skipped'; passed = $true; path = $env:CODEX_GIT_BOUNDARY_STALE })
 
     Invoke-FailureCase hang timeout
     Invoke-FailureCase stdout-overflow output-limit
@@ -161,6 +167,7 @@ try {
 
     $script:GitCommandLimitPerReconcile = 64
     $script:DiscoveryWorktreeLimit = 4
+    $script:DiscoveryRepositoryLimit = 2
     Invoke-FailureCase worktree-overflow $null
     $script:DiscoveryWorktreeLimit = 32
     $script:GitCommandLimitPerReconcile = 8
@@ -235,6 +242,7 @@ finally {
     $env:CODEX_GIT_BOUNDARY_CONTROL = $controlPath
     $env:CODEX_GIT_BOUNDARY_LOG = $logPath
     $env:CODEX_GIT_BOUNDARY_REPO = $repo
+    $env:CODEX_GIT_BOUNDARY_STALE = $staleRepo
     $env:CODEX_GIT_RESOURCE_SAMPLES = $samplesPath
     $env:CODEX_WORKTREE_TRUST_BRIDGE_RUN_ID = 'git-reconcile-' + [guid]::NewGuid().ToString('N')
     $resultText = & $adapterPath -ConfigPath $configPath -InstanceName ('git-reconcile-' + [guid]::NewGuid().ToString('N'))
@@ -252,6 +260,7 @@ finally {
         @('CODEX_GIT_BOUNDARY_CONTROL', $oldControl),
         @('CODEX_GIT_BOUNDARY_LOG', $oldLog),
         @('CODEX_GIT_BOUNDARY_REPO', $oldRepo),
+        @('CODEX_GIT_BOUNDARY_STALE', $oldStale),
         @('CODEX_GIT_RESOURCE_SAMPLES', $oldSamples),
         @('CODEX_WORKTREE_TRUST_BRIDGE_RUN_ID', $oldRunId)
     )) {
