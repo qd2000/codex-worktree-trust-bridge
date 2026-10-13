@@ -2,6 +2,7 @@
 param(
     [string]$ArtifactDirectory = (Join-Path (Split-Path -Parent $PSScriptRoot) '.artifacts\bin'),
     [Parameter(Mandatory)][string]$SuiteReceiptPath,
+    [Parameter(Mandatory)][string]$LiveHealthReceiptPath,
     [string]$OutputRoot = (Join-Path (Split-Path -Parent $PSScriptRoot) '.artifacts\frozen-candidates')
 )
 
@@ -19,6 +20,16 @@ if (-not [bool]$suite.passed -or [int]$suite.testCount -ne [int]$suite.expectedT
     [string]$suite.gitReconcileAcceptance -cne 'ISOLATED_BOUNDED_GIT_RECONCILE_PASSED_WHEN_SUITE_PASSES' -or
     @($suite.receipts | Where-Object { -not [bool]$_.passed -or -not [bool]$_.cleanupVerified }).Count) {
     throw 'Candidate freeze requires the complete passing suite for this exact manifest.'
+}
+$livePath = ConvertTo-BridgeCanonicalPath $LiveHealthReceiptPath
+$live = Read-BridgeJson -Path $livePath -MaximumBytes 1048576
+if ([string]$live.schema -cne 'codex-worktree-trust-bridge.live-ui-health-cadence' -or
+    [int]$live.version -ne 1 -or -not [bool]$live.passed -or
+    [string]$live.hostName -ine 'QDSPC' -or -not [bool]$live.cleanupVerified -or
+    [bool]$live.productionTaskMutated -or [bool]$live.uiActionRequested -or
+    [int]$live.sampleCount -lt 60 -or [double]$live.maximumHealthAgeSeconds -gt 45 -or
+    ([string]$live.artifactManifestSha256).ToLowerInvariant() -cne $artifact.ManifestSha256.ToLowerInvariant()) {
+    throw 'Candidate freeze requires a passing QDSPC live-UI health cadence receipt for this exact manifest.'
 }
 $head = (& git -C $root rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0) { throw 'Cannot identify candidate source commit.' }
@@ -66,6 +77,10 @@ try {
         suiteReceiptPath = $suitePath
         suiteReceiptSha256 = Get-BridgeFileHash $suitePath
         suiteTestCount = [int]$suite.testCount
+        liveHealthReceiptPath = $livePath
+        liveHealthReceiptSha256 = Get-BridgeFileHash $livePath
+        liveHealthSamples = [int]$live.sampleCount
+        liveHealthMaximumAgeSeconds = [double]$live.maximumHealthAgeSeconds
         artifactCount = @($artifact.Entries).Count
         sourceDirty = $false; accepted = $true; byteIdenticalDeploymentRequired = $true
     }

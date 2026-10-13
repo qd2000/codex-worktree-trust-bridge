@@ -165,7 +165,16 @@ foreach ($directory in @($StateDirectory, $LogDirectory, $BackupDirectory)) {
 
 $userToken = ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name -replace '[^A-Za-z0-9_.-]', '_')
 $instanceToken = if ([string]::IsNullOrWhiteSpace($InstanceName)) {
-    $userToken
+    # Match the launcher's per-user/per-config ownership boundary. A user may run
+    # an isolated diagnostic or test configuration beside production without
+    # either process being mistaken for a duplicate of the other.
+    $identityBytes = [Text.Encoding]::UTF8.GetBytes($userToken + '|' + (Get-CanonicalPath $ConfigPath))
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        $identityHash = [BitConverter]::ToString($sha256.ComputeHash($identityBytes)).Replace('-', '').ToLowerInvariant()
+    }
+    finally { $sha256.Dispose() }
+    $userToken + '-' + $identityHash.Substring(0, 20)
 }
 else {
     ($InstanceName -replace '[^A-Za-z0-9_.-]', '_')

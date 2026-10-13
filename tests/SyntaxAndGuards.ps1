@@ -58,6 +58,13 @@ $publisher = Get-Content -LiteralPath (Join-Path $root 'tools\Publish-FrozenCand
 if ($publisher -match '\-\-clobber|release\s+upload') {
     throw 'Frozen-candidate publication contains an overwrite path.'
 }
+$freezer = Get-Content -LiteralPath (Join-Path $root 'tools\Freeze-Candidate.ps1') -Raw
+foreach ($required in @('LiveHealthReceiptPath', 'live-ui-health-cadence',
+    'productionTaskMutated', 'maximumHealthAgeSeconds', 'liveHealthReceiptSha256')) {
+    if (-not $freezer.Contains($required, [StringComparison]::Ordinal)) {
+        throw "Candidate freeze is missing a live-QDSPC health gate: $required"
+    }
+}
 foreach ($required in @('ls-remote --tags', 'release view', 'release create', '--verify-tag')) {
     if (-not $publisher.Contains($required, [StringComparison]::OrdinalIgnoreCase)) {
         throw "Frozen-candidate publication is missing a no-clobber gate: $required"
@@ -100,6 +107,16 @@ if (-not $manifest.sourceDirty) {
 
 $guardRoot = Join-Path $root ('.artifacts\guard-' + [guid]::NewGuid().ToString('N'))
 try {
+    $dateProbePath = Join-Path $guardRoot 'utc-date-probe.json'
+    $dateProbeValue = [DateTime]::UtcNow.ToString('o')
+    Write-BridgeAtomicJson -Path $dateProbePath -Value @{ updatedAtUtc = $dateProbeValue }
+    $dateProbe = Read-BridgeJson -Path $dateProbePath
+    if ($dateProbe.updatedAtUtc -isnot [string] -or [string]$dateProbe.updatedAtUtc -cne $dateProbeValue) {
+        throw 'Maintenance JSON parsing did not preserve the exact UTC timestamp string.'
+    }
+    $dateProbeAge = [Math]::Abs(([DateTimeOffset]::UtcNow - [DateTimeOffset]::Parse([string]$dateProbe.updatedAtUtc)).TotalSeconds)
+    if ($dateProbeAge -gt 5) { throw "Fresh UTC receipt was misclassified by $dateProbeAge seconds." }
+
     $productionNameLayout = New-BridgeMaintenanceLayout -TaskName 'Codex-Worktree-Trust-Bridge' `
         -InstallRoot (Join-Path $guardRoot 'install') -ConfigPath (Join-Path $guardRoot 'bridge.json') `
         -StatePath (Join-Path $guardRoot 'state.json') -ActionLedgerPath (Join-Path $guardRoot 'actions.json') `
@@ -135,5 +152,7 @@ finally {
     authorityHasNoUia = $true
     boundedGitRunnerGuarded = $true
     pidReuseSafeDescendantSelection = $true
+    utcReceiptDatePreserved = $true
+    liveQdspcHealthRequiredForFreeze = $true
     unsafeBroadProcessPatterns = 0
 } | ConvertTo-Json

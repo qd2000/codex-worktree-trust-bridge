@@ -103,7 +103,11 @@ function Read-BridgeJson {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "JSON file is missing: $Path" }
     $item = Get-Item -LiteralPath $Path
     if ($item.Length -gt $MaximumBytes) { throw "JSON file exceeds its bounded size: $Path" }
-    return Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json -AsHashtable
+    # PowerShell 7.5 otherwise materializes ISO-8601 values as DateTime. Casting
+    # that object back to string can discard the original UTC designator and
+    # make a fresh health receipt appear one local offset old. Maintenance
+    # receipts are a wire format: preserve date values exactly as JSON strings.
+    return Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json -AsHashtable -DateKind String
 }
 
 function Write-BridgeAtomicText {
