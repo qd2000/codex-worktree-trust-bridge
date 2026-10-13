@@ -57,6 +57,18 @@ function Read-ControlledStatus {
     $reader = [IO.StreamReader]::new($stream)
     try { return $reader.ReadToEnd() | ConvertFrom-Json -AsHashtable } finally { $reader.Dispose() }
 }
+function Wait-ControlledStatus {
+    param([Parameter(Mandatory)][scriptblock]$Condition, [string]$Description = 'controlled fixture state')
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    do {
+        $status = Read-ControlledStatus
+        if (& $Condition $status) { return $status }
+        if ($clock.Elapsed.TotalSeconds -ge 5) {
+            throw "Timed out waiting for $Description. Last status: $($status | ConvertTo-Json -Compress -Depth 5)"
+        }
+        Start-Sleep -Milliseconds 25
+    } while ($true)
+}
 function Get-VerifiedCodexTargets {
     $status = Read-ControlledStatus
     return @{ pid = $status.pid; hwnd = $status.hwnd; executable = $status.executable; createdFileTimeUtc = $status.createdFileTimeUtc }
@@ -121,9 +133,14 @@ try {
     $deniedKey = Get-CanonicalPath ([string]$BridgeConfig.testDenied)
     [IO.File]::AppendAllText($CodexConfigPath, "`r`n[projects.'$deniedKey']`r`ntrust_level = 'untrusted'`r`n", [Text.UTF8Encoding]::new($false))
     Advance-ControlledDialog -Mode valid -Folder ([string]$BridgeConfig.testDenied)
-    $status = Read-ControlledStatus
+    # InvokePattern dispatch is complete when Invoke returns, but the WPF Click
+    # handler may publish its test-only counter a few milliseconds later. Wait
+    # for that externally observable state rather than racing the UI thread.
+    $status = Wait-ControlledStatus -Description 'one controlled cancellation' -Condition {
+        param($value) [int]$value.cancelled -eq 1
+    }
     if ($status.approved -ne 2 -or $status.cancelled -ne 1 -or (Test-ExactTrustedEntry $deniedKey)) {
-        throw 'Explicit manual denial was not preserved while cancelling the controlled denied dialog.'
+        throw "Explicit manual denial was not preserved while cancelling the controlled denied dialog. Status: $($status | ConvertTo-Json -Compress -Depth 5)"
     }
     $caseNames.Add('manual denial and controlled Cancel semantics preserved')
 
