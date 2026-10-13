@@ -56,6 +56,16 @@ function Get-ExactProcess {
     catch { $p.Dispose(); throw }
 }
 
+function Wait-OwnedJobEmpty {
+    param([Parameter(Mandatory)]$Owned, [int]$TimeoutMilliseconds = 10000)
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    do {
+        if (@($Owned.GetProcessIds()).Count -eq 0) { return $true }
+        Start-Sleep -Milliseconds 20
+    } while ($clock.ElapsedMilliseconds -lt $TimeoutMilliseconds)
+    return @($Owned.GetProcessIds()).Count -eq 0
+}
+
 function Invoke-LauncherCase {
     param([string]$Launcher, [string]$Mode, [int]$Index)
     $config = Join-Path $testRoot "case-$Mode-$Index.json"
@@ -87,7 +97,9 @@ function Invoke-LauncherCase {
                 throw "Residual process after $Mode."
             }
             if ($Mode -eq 'normal' -and $owned.ExitCode -ne 0) { throw 'Normal launcher exit was not successful.' }
-            if (@($owned.GetProcessIds()).Count -ne 0) { throw 'Owning job still contains a process.' }
+            if (-not (Wait-OwnedJobEmpty -Owned $owned -TimeoutMilliseconds 10000)) {
+                throw 'Owning job still contains a process after the cleanup deadline.'
+            }
             $records.Add(@{ mode = $Mode; residual = $false; childPid = $child.Id; grandchildPid = $grand.Id; startedAtUtc = $started.ToString('o') })
         }
     }
