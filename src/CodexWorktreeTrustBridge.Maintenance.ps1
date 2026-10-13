@@ -363,7 +363,11 @@ function Test-BridgeRuntimeCommandLine {
 }
 
 function ConvertTo-BridgeProcessIdentity {
-    param([Parameter(Mandatory)]$CimProcess, [Parameter(Mandatory)][string]$Role)
+    param(
+        [Parameter(Mandatory)]$CimProcess,
+        [Parameter(Mandatory)][string]$Role,
+        [switch]$AllowExited
+    )
     $process = $null
     try {
         $process = [Diagnostics.Process]::GetProcessById([int]$CimProcess.ProcessId)
@@ -382,6 +386,11 @@ function ConvertTo-BridgeProcessIdentity {
                 finally { $hash.Dispose() }
             } else { $null }
         }
+    }
+    catch {
+        $cause = $_.Exception.GetBaseException()
+        if ($AllowExited -and $cause -is [ArgumentException]) { return $null }
+        throw
     }
     finally { if ($null -ne $process) { $process.Dispose() } }
 }
@@ -434,12 +443,26 @@ function Get-BridgeProcessSet {
             }
         }
     }
+    $launcherIdentity = if ($launcher) {
+        ConvertTo-BridgeProcessIdentity -CimProcess $launcher -Role launcher -AllowExited
+    } else { $null }
+    $runtimeIdentity = if ($runtime) {
+        ConvertTo-BridgeProcessIdentity -CimProcess $runtime -Role runtime -AllowExited
+    } else { $null }
+    $descendantIdentities = @($descendantRows | ForEach-Object {
+        $identity = ConvertTo-BridgeProcessIdentity -CimProcess $_ -Role descendant -AllowExited
+        if ($null -ne $identity) { $identity }
+    })
+    if (-not $AllowMissingPair -and [string]$Task.State -eq 'Running' -and
+        ($null -eq $launcherIdentity -or $null -eq $runtimeIdentity)) {
+        throw 'The exact launcher/runtime pair exited while its identity was being captured.'
+    }
     return [pscustomobject]@{
         Task = $Task
         Action = $action
-        Launcher = if ($launcher) { ConvertTo-BridgeProcessIdentity -CimProcess $launcher -Role launcher } else { $null }
-        Runtime = if ($runtime) { ConvertTo-BridgeProcessIdentity -CimProcess $runtime -Role runtime } else { $null }
-        Descendants = @($descendantRows | ForEach-Object { ConvertTo-BridgeProcessIdentity -CimProcess $_ -Role descendant })
+        Launcher = $launcherIdentity
+        Runtime = $runtimeIdentity
+        Descendants = $descendantIdentities
     }
 }
 
