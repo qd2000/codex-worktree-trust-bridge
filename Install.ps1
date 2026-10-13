@@ -13,6 +13,11 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# Development-branch guard: the v0.2.1 maintenance path below is not accepted for
+# the new owned-runtime layout. Replace it and test backup/upgrade/rollback
+# before removing this guard. This does not alter an installed v0.2.1 bridge.
+throw 'V022_MAINTENANCE_NOT_ACCEPTED: installation from this development checkout is disabled; controlled upgrade and rollback implementation is still pending.'
+
 if ($env:OS -ne 'Windows_NT') { throw 'This installer supports Windows only.' }
 if (-not (Get-Command git.exe -ErrorAction SilentlyContinue)) { throw 'Git for Windows is required.' }
 $pwsh = (Get-Command pwsh.exe -ErrorAction Stop).Source

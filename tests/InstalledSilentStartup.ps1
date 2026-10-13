@@ -10,6 +10,10 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# This old test stops the real installed task and is not an isolated fixture.
+# Keep it unreachable until replaced by explicitly scoped maintenance tests.
+throw 'V022_MAINTENANCE_NOT_ACCEPTED: the legacy installed-task stress test is disabled because it mutates the production task without the new ownership contract.'
+
 $codexHome = Join-Path $env:USERPROFILE '.codex'
 $installRoot = Join-Path $codexHome 'tools\codex-worktree-trust-bridge'
 $launcherPath = Join-Path $installRoot 'CodexWorktreeTrustBridge.Launcher.exe'

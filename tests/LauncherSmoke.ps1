@@ -6,6 +6,7 @@ $ErrorActionPreference = 'Stop'
 
 $packageRoot = Split-Path -Parent $PSScriptRoot
 $launcherSource = Join-Path $packageRoot 'src\CodexWorktreeTrustBridge.Launcher.cs'
+$nativeSource = Join-Path $packageRoot 'src\CodexWorktreeTrustBridge.Native.cs'
 $pwsh = (Get-Command pwsh.exe -ErrorAction Stop).Source
 $compilerCandidates = @(
     (Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'),
@@ -42,7 +43,11 @@ function Get-PeSubsystem {
 
 try {
     New-Item -ItemType Directory -Force -Path $testRoot | Out-Null
-    & $compiler /nologo /target:winexe /platform:anycpu /optimize+ ("/out:$launcher") $launcherSource
+    $native = Join-Path $testRoot 'CodexWorktreeTrustBridge.Native.dll'
+    & $compiler /nologo /target:library /platform:anycpu /optimize+ ("/out:$native") $nativeSource
+    if ($LASTEXITCODE -ne 0) { throw "Native helper compilation failed: $LASTEXITCODE" }
+    & $compiler /nologo /target:winexe /platform:anycpu /optimize+ ("/out:$launcher") `
+        ("/reference:$native") /reference:System.Web.Extensions.dll $launcherSource
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $launcher -PathType Leaf)) {
         throw "Launcher compilation failed with exit code $LASTEXITCODE."
     }

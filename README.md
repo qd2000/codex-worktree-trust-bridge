@@ -1,5 +1,16 @@
 # Codex Worktree Trust Bridge
 
+> **v0.2.2 development branch — not a release or accepted installation.**
+> Core resource/lifecycle changes and isolated tests are in progress. The legacy
+> install/uninstall/installed-task mutation paths are deliberately blocked in
+> this checkout. The two-hour representative gray run, controlled upgrade and
+> rollback, and release-artifact workflow are not accepted yet. See
+> [development progress](docs/v0.2.2-progress.md) and the
+> [frozen acceptance contract](docs/v0.2.2-acceptance.md).
+> The production `v0.2.1` tag and existing installations are not changed by this
+> development checkout. The installation instructions below describe that
+> previously published release until the v0.2.2 maintenance gate is complete.
+
 [![Windows](https://img.shields.io/badge/platform-Windows-0078D4)](https://www.microsoft.com/windows)
 [![PowerShell 7](https://img.shields.io/badge/PowerShell-7%2B-5391FE)](https://github.com/PowerShell/PowerShell)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -338,6 +349,19 @@ See [SECURITY.md](SECURITY.md) for vulnerability-reporting guidance.
 
 ## Development and verification
 
+For this **unreleased v0.2.2 branch**, use the finite, isolated core suite:
+
+```powershell
+pwsh.exe -NoLogo -NoProfile -File .\Build.ps1
+pwsh.exe -NoLogo -NoProfile -File .\tests\Run-CoreSuite.ps1
+```
+
+It keeps raw output, resource samples, artifact hashes and verified job-cleanup
+receipts under ignored `.artifacts`. The controlled UI fixtures do not modify
+the user's Codex trust configuration or click business dialogs. A core-suite
+pass is not installation, rollback, two-hour stability, or release acceptance.
+See `docs/v0.2.2-progress.md` for the remaining gates and evidence scope.
+
 Parse all PowerShell files:
 
 ```powershell
@@ -360,8 +384,9 @@ ordinary directory, preserves an existing double-quoted TOML project table
 without creating a duplicate, rejects a junction, and removes all temporary
 files.
 
-After installing on a Windows desktop, exercise repeated real Scheduled Task
-starts and verify the launcher/runtime process pair has no visible main window:
+The old live-installed-task stress entry below is retained for reference but is
+**blocked before mutation in this development branch**. Its stop/restart logic
+must be replaced by exact-identity, backed-up maintenance tests before use:
 
 ```powershell
 pwsh.exe -NoLogo -NoProfile -File .\tests\InstalledSilentStartup.ps1 -Iterations 5
@@ -369,8 +394,11 @@ pwsh.exe -NoLogo -NoProfile -File .\tests\InstalledSilentStartup.ps1 -Iterations
 
 ## Releases
 
-Version tags use `vMAJOR.MINOR.PATCH`. Pushing a version tag runs the repository's
-release workflow, builds a portable ZIP, and publishes a GitHub Release.
+Version tags use `vMAJOR.MINOR.PATCH`. This development branch's workflow refuses
+publication: no accepted binary artifact or two-hour gray receipt exists yet.
+The replacement release flow must publish the exact accepted artifact without
+overwriting an existing tag or asset. Do not push a release tag to bypass the
+blocked install, maintenance, or sustained-validation gates.
 
 See [CHANGELOG.md](CHANGELOG.md) for release notes.
 

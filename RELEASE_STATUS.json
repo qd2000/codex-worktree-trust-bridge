@@ -1,0 +1,13 @@
+{
+  "schema": "codex-worktree-trust-bridge.release-status",
+  "version": 1,
+  "targetVersion": "0.2.2",
+  "implementationComplete": false,
+  "maintenanceImplementationReady": false,
+  "candidateAccepted": false,
+  "sustainedValidationAccepted": false,
+  "releaseAllowed": false,
+  "deploymentAllowed": false,
+  "state": "source-repair-in-progress",
+  "continuation": "docs/v0.2.2-progress.md"
+}

@@ -4,6 +4,7 @@
 *.log
 *.zip
 dist/
+.artifacts/
 codex-worktree-trust-bridge.json
 *.local.json
 .DS_Store

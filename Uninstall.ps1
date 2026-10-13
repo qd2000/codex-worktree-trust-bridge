@@ -7,6 +7,10 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# The legacy process-substring stop implementation below must be replaced, not
+# enabled merely by changing a readiness flag. No host mutation precedes this.
+throw 'V022_MAINTENANCE_NOT_ACCEPTED: uninstall from this development checkout is disabled until exact-identity stop and rollback are implemented and tested.'
+
 $codexHome = Join-Path $env:USERPROFILE '.codex'
 $installRoot = Join-Path $codexHome 'tools\codex-worktree-trust-bridge'
 $runtimePath = Join-Path $installRoot 'CodexWorktreeTrustBridge.ps1'

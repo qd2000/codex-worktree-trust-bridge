@@ -4,6 +4,36 @@ All notable changes to this project are documented in this file.
 
 The project follows semantic versioning.
 
+## [0.2.2] - Unreleased; implementation and acceptance incomplete
+
+### Implemented in the development branch
+
+- Atomically create the runtime in a kill-on-close Windows Job Object, including
+  the pre-resume ownership window; reject duplicate launchers and publish
+  process-birth and artifact identities.
+- Move UIA to a dedicated MTA worker with bounded traversal, frame size, memory,
+  request deadline, token lifetime, diagnostics, and circuit-open recovery.
+- Retain durable uncertain-action intents so worker recovery does not blindly
+  repeat a potentially completed authorization. Keep configuration writes in
+  the authority process and revalidate the observed dialog before writing.
+- Preserve config backups and add preimage conflict detection and atomic file
+  replacement. Replacement errors latch an explicit uncertain-write state.
+- Require current-user Store package registration and an exact executable path
+  when a full-trust Codex process lacks a token package identity.
+- Require live process-birth, manifest, UI/resource health and worker evidence
+  for status; a recent reconcile alone is not sufficient for `HEALTHY`.
+- Add bounded lifecycle, controlled-dialog, fault-injection, authority/config,
+  and old/new observation-only resource tests.
+
+### Release blockers
+
+- Exact-identity maintenance, backup/upgrade/rollback and their controlled tests
+  are unfinished. Legacy mutation entry points are blocked, not repurposed.
+- Git/reconcile-only resource comparison and at least two continuous hours of
+  representative gray observation against a frozen final artifact are pending.
+- A single accepted binary artifact must be used by the release and all hosts.
+  No tag, GitHub release, candidate installation or fleet rollout is claimed.
+
 ## [0.2.1] - 2026-10-06
 
 ### Added

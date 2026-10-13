@@ -1,90 +1,25 @@
-name: Publish release
+name: Release acceptance gate
 
 on:
   push:
     tags:
       - "v*"
-    branches:
-      - main
-    paths:
-      - ".github/workflows/release.yml"
   workflow_dispatch:
 
+# A development branch must not overwrite an existing release or turn a
+# source-only archive into an alleged accepted multi-host binary artifact.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  release:
+  acceptance-required:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Select release tag and build portable archive
+      - name: Refuse publication until the accepted-artifact flow is implemented
         shell: pwsh
         run: |
-          if ($env:GITHUB_REF_TYPE -eq 'tag') {
-            $tag = $env:GITHUB_REF_NAME
-          }
-          else {
-            $branchVersion = (Get-Content -LiteralPath VERSION -Raw).Trim()
-            $tag = "v$branchVersion"
-            & git fetch --tags --force
-            if ($LASTEXITCODE -ne 0) {
-              throw 'Unable to fetch release tags.'
-            }
-            & git checkout --detach $tag
-            if ($LASTEXITCODE -ne 0) {
-              throw "Release tag $tag does not exist."
-            }
-          }
-
-          $version = (Get-Content -LiteralPath VERSION -Raw).Trim()
-          if ($tag -ne "v$version") {
-            throw "Tag $tag does not match VERSION $version"
-          }
-          "RELEASE_TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-          $stageRoot = Join-Path $env:RUNNER_TEMP "codex-worktree-trust-bridge-$version"
-          New-Item -ItemType Directory -Force -Path $stageRoot | Out-Null
-          $items = @(
-            'Install.cmd',
-            'Install.ps1',
-            'Uninstall.cmd',
-            'Uninstall.ps1',
-            'Status.ps1',
-            'README.md',
-            'CHANGELOG.md',
-            'SECURITY.md',
-            'LICENSE',
-            'VERSION',
-            'config',
-            'src',
-            'tests'
-          )
-          foreach ($item in $items) {
-            Copy-Item -LiteralPath $item -Destination $stageRoot -Recurse -Force
-          }
-
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          $archive = Join-Path (Resolve-Path dist) "codex-worktree-trust-bridge-$version.zip"
-          Compress-Archive -Path $stageRoot -DestinationPath $archive -CompressionLevel Optimal
-
-      - name: Create or update GitHub Release
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          tag="${RELEASE_TAG}"
-          asset="dist/codex-worktree-trust-bridge-${tag#v}.zip"
-          if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" "$asset" --clobber
-          else
-            gh release create "$tag" "$asset" \
-              --verify-tag \
-              --generate-notes \
-              --title "Codex Worktree Trust Bridge $tag"
-          fi
+          $status = Get-Content -LiteralPath RELEASE_STATUS.json -Raw | ConvertFrom-Json
+          Write-Output "Target $($status.targetVersion), state $($status.state)"
+          throw 'V022_RELEASE_NOT_ACCEPTED: implement and verify publication of the single accepted binary artifact after all frozen gates pass. Existing releases must never be overwritten.'

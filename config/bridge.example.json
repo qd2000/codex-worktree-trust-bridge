@@ -1,7 +1,7 @@
 {
   "schema": "codex-worktree-trust-bridge.config",
   "version": 1,
-  "packageVersion": "0.2.0",
+  "packageVersion": "0.2.2",
   "allowedRoots": [
     "C:\\PROJECT",
     "E:\\PROJECT"

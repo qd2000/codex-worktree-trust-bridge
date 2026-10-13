@@ -23,6 +23,9 @@ $launcherPath = Join-Path $installRoot 'CodexWorktreeTrustBridge.Launcher.exe'
 $configPath = Join-Path $codexHome 'codex-worktree-trust-bridge.json'
 $statePath = Join-Path $codexHome 'state\codex-worktree-trust-bridge.json'
 $logPath = Join-Path $codexHome 'log\codex-worktree-trust-bridge.log'
+$workerPath = Join-Path $installRoot 'CodexWorktreeTrustBridge.UiWorker.exe'
+$healthPath = "$configPath.health.json"
+$processReceiptPath = "$configPath.process.json"
 
 $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 $taskInfo = if ($task) { Get-ScheduledTaskInfo -TaskName $TaskName } else { $null }
@@ -32,6 +35,9 @@ $launcherProcesses = @($allProcesses | Where-Object {
 })
 $runtimeProcesses = @($allProcesses | Where-Object {
     $_.Name -ieq 'pwsh.exe' -and $_.CommandLine -and $_.CommandLine -like "*$runtimePath*"
+})
+$workerProcesses = @($allProcesses | Where-Object {
+    $_.ExecutablePath -and (Test-SamePath $_.ExecutablePath $workerPath)
 })
 
 $config = $null
@@ -91,6 +97,71 @@ if ($latestReconciled -and $launcherProcess -and $latestReconciled.data.PSObject
     $reconcileMatchesLauncher = [int]$latestReconciled.data.launcherPid -eq [int]$launcherProcess.ProcessId
 }
 
+$liveHealth = $null
+$identityVerified = $false
+$identityError = $null
+$artifactHash = $null
+$resourcePrivateBytes = 0L
+$resourceWorkingSetBytes = 0L
+$resourceHandles = 0L
+foreach ($row in @($launcherProcesses) + @($runtimeProcesses) + @($workerProcesses)) {
+    $resourcePrivateBytes += [long]$row.PrivatePageCount
+    $resourceWorkingSetBytes += [long]$row.WorkingSetSize
+    $resourceHandles += [long]$row.HandleCount
+}
+try {
+    if (-not $processPairValid) { throw 'No unique matching launcher/runtime pair.' }
+    foreach ($file in @($healthPath, $processReceiptPath, (Join-Path $installRoot 'manifest.json'))) {
+        if (-not (Test-Path -LiteralPath $file -PathType Leaf) -or (Get-Item -LiteralPath $file).Length -gt 256KB) {
+            throw 'Live health, process receipt, or bounded artifact manifest is missing.'
+        }
+    }
+    $liveHealth = Get-Content -LiteralPath $healthPath -Raw | ConvertFrom-Json
+    $receipt = Get-Content -LiteralPath $processReceiptPath -Raw | ConvertFrom-Json
+    $manifestPath = Join-Path $installRoot 'manifest.json'
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    $artifactHash = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash
+    if ($liveHealth.schema -ne 'codex-worktree-trust-bridge.health' -or $liveHealth.version -ne 1 -or
+        $receipt.schema -ne 'codex-worktree-trust-bridge.process' -or $receipt.version -ne 1 -or
+        $manifest.schema -ne 'codex-worktree-trust-bridge.build' -or $manifest.version -ne 1) { throw 'Unrecognized evidence schema.' }
+    $age = ([DateTimeOffset]::UtcNow - [DateTimeOffset]::Parse($liveHealth.updatedAtUtc)).TotalSeconds
+    if ($age -lt 0 -or $age -gt 45 -or $receipt.phase -ne 'running' -or
+        $liveHealth.pid -ne $runtimeProcess.ProcessId -or $receipt.runtimePid -ne $runtimeProcess.ProcessId -or
+        $receipt.launcherPid -ne $launcherProcess.ProcessId -or $liveHealth.launcherPid -ne $launcherProcess.ProcessId -or
+        $liveHealth.runId -cne $receipt.runId -or [string]::IsNullOrWhiteSpace($liveHealth.runId)) { throw 'Evidence is stale or does not identify the live pair.' }
+    foreach ($identity in @(
+        @{ Id = [int]$launcherProcess.ProcessId; Birth = [string]$receipt.launcherStartFileTimeUtc },
+        @{ Id = [int]$runtimeProcess.ProcessId; Birth = [string]$receipt.runtimeStartFileTimeUtc }
+    )) {
+        $p = [Diagnostics.Process]::GetProcessById($identity.Id)
+        try { if ($p.HasExited -or $p.StartTime.ToUniversalTime().ToFileTimeUtc().ToString() -ne $identity.Birth) { throw 'Process creation identity changed.' } }
+        finally { $p.Dispose() }
+    }
+    if ($liveHealth.creationFileTimeUtc -ne $receipt.runtimeStartFileTimeUtc -or
+        -not (Test-SamePath $receipt.configPath $configPath) -or -not (Test-SamePath $receipt.runtimePath $runtimePath) -or
+        -not (Test-SamePath $receipt.launcherPath $launcherPath)) { throw 'Evidence paths or runtime birth do not agree.' }
+    $artifacts = @($manifest.artifacts)
+    if ($artifacts.Count -lt 6 -or $artifacts.Count -gt 32) { throw 'Manifest file count is invalid.' }
+    foreach ($artifact in $artifacts) {
+        if ($artifact.path -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$' -or $artifact.sha256 -notmatch '^[a-fA-F0-9]{64}$') { throw 'Unsafe manifest entry.' }
+        if ((Get-FileHash -LiteralPath (Join-Path $installRoot $artifact.path) -Algorithm SHA256).Hash -ne $artifact.sha256) { throw 'An installed artifact no longer matches its manifest.' }
+    }
+    if ($artifactHash -ne $liveHealth.sourceManifestSha256 -or
+        $receipt.runtimeSha256 -ne (Get-FileHash -LiteralPath $runtimePath -Algorithm SHA256).Hash -or
+        $receipt.launcherSha256 -ne (Get-FileHash -LiteralPath $launcherPath -Algorithm SHA256).Hash -or
+        $liveHealth.packageVersion -ne $manifest.packageVersion) { throw 'The startup identities and current artifacts differ.' }
+    if ($liveHealth.ui.workerActive) {
+        if ($workerProcesses.Count -ne 1 -or $workerProcesses[0].ParentProcessId -ne $runtimeProcess.ProcessId -or
+            $workerProcesses[0].ProcessId -ne $liveHealth.ui.worker.ProcessId) { throw 'UI worker ownership does not match live health.' }
+        $p = [Diagnostics.Process]::GetProcessById([int]$workerProcesses[0].ProcessId)
+        try { if ($p.HasExited -or $p.StartTime.ToUniversalTime().ToFileTimeUtc() -ne [long]$liveHealth.ui.worker.CreationFileTimeUtc) { throw 'UI worker process identity changed.' } }
+        finally { $p.Dispose() }
+    }
+    elseif ($workerProcesses.Count -ne 0) { throw 'An unexpected UI worker remains alive.' }
+    $identityVerified = $true
+}
+catch { $identityError = $_.Exception.Message }
+
 $healthState = if (-not $task) {
     'NOT_INSTALLED'
 }
@@ -109,6 +180,15 @@ elseif (-not $processPairValid -or -not $reconcileMatchesLauncher) {
 elseif (-not $reconcileFresh) {
     'STALE_RECONCILE'
 }
+elseif (-not $identityVerified) {
+    'UNVERIFIED_UI_AND_RESOURCES'
+}
+elseif (-not $liveHealth.healthy -or $liveHealth.ui.state -notin @('HEALTHY', 'IDLE', 'DISABLED')) {
+    'DEGRADED'
+}
+elseif ($resourcePrivateBytes -gt 512MB -or $resourceHandles -gt 2000) {
+    'RESOURCE_DEGRADED'
+}
 else {
     'HEALTHY'
 }
@@ -116,6 +196,13 @@ else {
 $result = [pscustomobject]@{
     Healthy = $healthState -eq 'HEALTHY'
     HealthState = $healthState
+    ProcessIdentityVerified = $identityVerified
+    IdentityError = $identityError
+    LiveHealth = $liveHealth
+    ArtifactManifestSha256 = $artifactHash
+    SustainedAcceptance = 'Not inferred from this instantaneous status check.'
+    ResourceSample = @{ privateBytes = $resourcePrivateBytes; workingSetBytes = $resourceWorkingSetBytes; handles = $resourceHandles }
+    WorkerProcesses = @($workerProcesses | Select-Object ProcessId, ParentProcessId, CreationDate, ExecutablePath)
     Task = if ($task) { [pscustomobject]@{
         Name = $task.TaskName
         State = [string]$task.State

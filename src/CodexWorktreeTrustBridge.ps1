@@ -8,8 +8,15 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-Add-Type -AssemblyName UIAutomationClient
-Add-Type -AssemblyName UIAutomationTypes
+
+$versionPath = Join-Path $PSScriptRoot 'VERSION'
+if (-not (Test-Path -LiteralPath $versionPath)) { $versionPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'VERSION' }
+$PackageVersion = (Get-Content -LiteralPath $versionPath -Raw).Trim()
+$manifestPath = Join-Path $PSScriptRoot 'manifest.json'
+$SourceManifestHash = if (Test-Path -LiteralPath $manifestPath) { (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash } else { $null }
+$script:LastReconcileSucceeded = $false
+$script:ReconcileCount = 0
+$script:ConfigWriteUncertain = $false
 
 $NewBeginMarker = '# BEGIN CODEX WORKTREE TRUST BRIDGE'
 $NewEndMarker = '# END CODEX WORKTREE TRUST BRIDGE'
@@ -121,6 +128,10 @@ function Write-BridgeLog {
         [Parameter(Mandatory = $true)][string]$Event,
         [hashtable]$Data = @{}
     )
+    $Data['pid'] = $PID
+    $Data['launcherPid'] = $LauncherProcessId
+    $Data['packageVersion'] = $PackageVersion
+    $Data['runId'] = $env:CODEX_WORKTREE_TRUST_BRIDGE_RUN_ID
     $record = [ordered]@{
         timestamp = (Get-Date).ToString('o')
         event = $Event
@@ -416,21 +427,33 @@ function Get-ManualProjectSections {
 function Backup-CodexConfig {
     if (-not (Test-Path -LiteralPath $CodexConfigPath -PathType Leaf)) { return }
     $stamp = Get-Date -Format 'yyyyMMdd-HHmmss-fff'
-    Copy-Item -LiteralPath $CodexConfigPath -Destination (Join-Path $BackupDirectory "config.$stamp.toml")
+    $backupPath = Join-Path $BackupDirectory "config.$stamp-$([guid]::NewGuid().ToString('N')).toml"
+    Copy-Item -LiteralPath $CodexConfigPath -Destination $backupPath
     $old = @(Get-ChildItem -LiteralPath $BackupDirectory -Filter 'config.*.toml' -File |
         Sort-Object LastWriteTime -Descending | Select-Object -Skip 20)
     foreach ($file in $old) { Remove-Item -LiteralPath $file.FullName -Force -ErrorAction SilentlyContinue }
+    return $backupPath
 }
 
 function Update-CodexTrustConfig {
-    param([Parameter(Mandatory = $true)]$ManagedPaths)
+    param([Parameter(Mandatory = $true)]$ManagedPaths, [scriptblock]$BeforeCommit)
     if (-not $EnableConfigTrust) { return }
-    if (-not $ConfigMutex.WaitOne(15000)) { throw 'Timed out waiting for the Codex config mutex.' }
+    if ($ConfigWriteUncertain) { throw 'A previous config replacement is uncertain; automatic writes remain disabled until reconciled.' }
+    $acquired = $false
+    $temporary = $null
+    try { $acquired = $ConfigMutex.WaitOne(15000) }
+    catch [Threading.AbandonedMutexException] { $acquired = $true }
+    if (-not $acquired) { throw 'Timed out waiting for the Codex config mutex.' }
     try {
         if (-not (Test-Path -LiteralPath $CodexConfigPath -PathType Leaf)) {
-            New-Item -ItemType File -Force -Path $CodexConfigPath | Out-Null
+            # CreateNew never truncates a file that appeared after Test-Path.
+            try { $created = [IO.File]::Open($CodexConfigPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read); $created.Dispose() }
+            catch [IO.IOException] { if (-not (Test-Path -LiteralPath $CodexConfigPath -PathType Leaf)) { throw } }
         }
+        if ((Get-Item -LiteralPath $CodexConfigPath).Length -gt 8MB) { throw 'Codex configuration exceeds the bounded parser budget.' }
+        $preimageHash = (Get-FileHash -LiteralPath $CodexConfigPath -Algorithm SHA256).Hash
         $original = [IO.File]::ReadAllText($CodexConfigPath)
+        if ((Get-FileHash -LiteralPath $CodexConfigPath -Algorithm SHA256).Hash -ne $preimageHash) { throw 'Codex configuration changed during the initial read.' }
         $base = Remove-ManagedBlocks $original
         $manual = Get-ManualProjectSections $base
         $builder = [Text.StringBuilder]::new($base)
@@ -449,14 +472,36 @@ function Update-CodexTrustConfig {
         [void]$builder.AppendLine($NewEndMarker)
         $updated = $builder.ToString()
         if ($updated -eq $original) { return }
-        Backup-CodexConfig
-        $temporary = "$CodexConfigPath.tmp-$PID"
+        if ([Text.Encoding]::UTF8.GetByteCount($updated) -gt 8MB) { throw 'Updated configuration exceeds the bounded write budget.' }
+        $backupPath = Backup-CodexConfig
+        $temporary = "$CodexConfigPath.tmp-$PID-$([guid]::NewGuid().ToString('N'))"
         [IO.File]::WriteAllText($temporary, $updated, [Text.UTF8Encoding]::new($false))
-        Move-Item -LiteralPath $temporary -Destination $CodexConfigPath -Force
-        Write-BridgeLog -Event 'CONFIG_SYNCED' -Data @{ managedCount = $ManagedPaths.Count }
+        # Validate after acquiring the config mutex and preparing the update,
+        # not before a potentially long mutex wait or discovery operation.
+        if ($BeforeCommit) { & $BeforeCommit }
+        if ((Get-FileHash -LiteralPath $CodexConfigPath -Algorithm SHA256).Hash -ne $preimageHash -or
+            (Get-FileHash -LiteralPath $backupPath -Algorithm SHA256).Hash -ne $preimageHash) {
+            Write-BridgeLog -Event 'CONFIG_CONCURRENT_CHANGE' -Data @{ backupPath = $backupPath; expectedHash = $preimageHash }
+            throw 'Codex configuration changed while preparing the update; the newer file was not replaced.'
+        }
+        try {
+            # Cooperating writers share ConfigMutex. This preimage guard detects
+            # non-cooperating edits before replacement; it is not a filesystem
+            # compare-and-swap transaction against arbitrary external writers.
+            [IO.File]::Replace($temporary, $CodexConfigPath, [NullString]::Value)
+        }
+        catch {
+            # Do not blindly replay a possibly completed replacement or restore
+            # an older snapshot over a third-party write after a failure.
+            $script:ConfigWriteUncertain = $true
+            Write-BridgeLog -Event 'CONFIG_WRITE_UNCERTAIN' -Data @{ backupPath = $backupPath; error = $_.Exception.Message }
+            throw
+        }
+        Write-BridgeLog -Event 'CONFIG_SYNCED' -Data @{ managedCount = $ManagedPaths.Count; backupPath = $backupPath; previousHash = $preimageHash }
     }
     finally {
-        [void]$ConfigMutex.ReleaseMutex()
+        try { if ($temporary -and (Test-Path -LiteralPath $temporary)) { Remove-Item -LiteralPath $temporary -Force } }
+        finally { [void]$ConfigMutex.ReleaseMutex() }
     }
 }
 
@@ -553,6 +598,7 @@ function Import-LegacyManagedPaths {
 }
 
 function Invoke-Reconcile {
+    $script:LastReconcileSucceeded = $false
     $discovered = Discover-RegisteredWorktrees
     $nextManagedPaths = New-PathSet
     foreach ($path in $discovered) { [void]$nextManagedPaths.Add($path) }
@@ -567,6 +613,8 @@ function Invoke-Reconcile {
     foreach ($path in $nextManagedPaths) { [void]$ManagedPaths.Add($path) }
     Update-CodexTrustConfig $ManagedPaths
     Save-ManagedState $ManagedPaths
+    $script:LastReconcileSucceeded = $true
+    $script:ReconcileCount++
     Write-BridgeLog -Event 'RECONCILED' -Data @{
         pid = $PID
         launcherPid = $LauncherProcessId
@@ -577,266 +625,29 @@ function Invoke-Reconcile {
 }
 
 function Ensure-ManagedTrust {
-    param([Parameter(Mandatory = $true)][string]$Path)
+    param([Parameter(Mandatory = $true)][string]$Path, [scriptblock]$BeforeWrite)
     $validation = Test-TrustEligiblePath $Path
     if (-not $validation.Ok) { return $validation }
     $canonical = $validation.Path
-    [void]$ManagedPaths.Add($canonical)
-    Update-CodexTrustConfig $ManagedPaths
-    Save-ManagedState $ManagedPaths
+    # Do not enqueue an uncommitted UI intent in the shared reconciliation set.
+    # A failed late dialog check must not be written by the next periodic sync.
+    $proposed = New-PathSet
+    foreach ($existingPath in $ManagedPaths) { [void]$proposed.Add($existingPath) }
+    [void]$proposed.Add($canonical)
+    Update-CodexTrustConfig -ManagedPaths $proposed -BeforeCommit $BeforeWrite
     if (-not (Test-ExactTrustedEntry $canonical)) {
         return [pscustomobject]@{ Ok = $false; Reason = 'exact trusted project entry is absent after config sync' }
     }
+    [void]$ManagedPaths.Add($canonical)
+    Save-ManagedState $ManagedPaths
     return [pscustomobject]@{ Ok = $true; Path = $canonical }
 }
 
-function Get-CodexRootElements {
-    $roots = @()
-    foreach ($process in Get-Process ChatGPT -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 }) {
-        try {
-            $root = [System.Windows.Automation.AutomationElement]::FromHandle($process.MainWindowHandle)
-            if ($root) { $roots += $root }
-        }
-        catch {}
-    }
-    return $roots
-}
-
-function Get-DialogAncestor {
-    param([Parameter(Mandatory = $true)]$Element)
-    $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
-    $current = $Element
-    while ($current) {
-        if ($current.Current.ControlType -eq [System.Windows.Automation.ControlType]::Window -and
-            [string]$current.Current.ClassName -like '*codex-dialog*') {
-            return $current
-        }
-        $current = $walker.GetParent($current)
-    }
-    return $null
-}
-
-function Get-AutomationElementIdentity {
-    param([Parameter(Mandatory = $true)]$Element)
-    try {
-        $runtimeId = @($Element.GetRuntimeId())
-        if ($runtimeId.Count) { return 'runtime:' + ($runtimeId -join '.') }
-    }
-    catch {}
-
-    $rectangle = $Element.Current.BoundingRectangle
-    return 'fallback:{0}|{1}|{2}|{3},{4},{5},{6}' -f @(
-        [int64]$Element.Current.NativeWindowHandle,
-        [string]$Element.Current.AutomationId,
-        [string]$Element.Current.ClassName,
-        [Math]::Round($rectangle.X, 2),
-        [Math]::Round($rectangle.Y, 2),
-        [Math]::Round($rectangle.Width, 2),
-        [Math]::Round($rectangle.Height, 2)
-    )
-}
-
-function Test-UiClassToken {
-    param(
-        [Parameter(Mandatory = $true)]$Element,
-        [Parameter(Mandatory = $true)][string]$Token
-    )
-    $tokens = @(([string]$Element.Current.ClassName) -split '\s+' | Where-Object { $_ })
-    return $Token -in $tokens
-}
-
-function Select-UniqueDialogButton {
-    param(
-        [Parameter(Mandatory = $true)]$VisibleButtons,
-        [Parameter(Mandatory = $true)][string[]]$Names,
-        [Parameter(Mandatory = $true)][string]$ClassToken,
-        [Parameter(Mandatory = $true)][string]$Role
-    )
-
-    $named = @($VisibleButtons | Where-Object { [string]$_.Current.Name -in $Names })
-    if ($named.Count -gt 1) { throw "Trust dialog contains multiple $Role buttons by accessible name." }
-    if ($named.Count -eq 1) { return $named[0] }
-
-    $classMatched = @($VisibleButtons | Where-Object { Test-UiClassToken -Element $_ -Token $ClassToken })
-    if ($classMatched.Count -ne 1) {
-        throw "Trust dialog does not contain one unambiguous $Role button."
-    }
-    return $classMatched[0]
-}
-
-function Get-TrustDialogButtons {
-    param(
-        [Parameter(Mandatory = $true)]$Dialog
-    )
-    $condition = [System.Windows.Automation.PropertyCondition]::new(
-        [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-        [System.Windows.Automation.ControlType]::Button
-    )
-    $buttons = $Dialog.FindAll([System.Windows.Automation.TreeScope]::Descendants, $condition)
-    $visible = @()
-    for ($index = 0; $index -lt $buttons.Count; $index++) {
-        $button = $buttons.Item($index)
-        if ($button.Current.IsEnabled -and -not $button.Current.IsOffscreen) { $visible += $button }
-    }
-    if ($visible.Count -lt 2) { throw 'Trust dialog does not contain the expected button set.' }
-
-    $trustButton = Select-UniqueDialogButton -VisibleButtons $visible `
-        -Names @('信任文件夹', 'Trust Folder', 'Trust this folder') `
-        -ClassToken 'bg-primary-solid' -Role 'trust'
-    $cancelButton = Select-UniqueDialogButton -VisibleButtons $visible `
-        -Names @('取消', 'Cancel') `
-        -ClassToken 'bg-transparent' -Role 'cancel'
-
-    $trustIdentity = Get-AutomationElementIdentity $trustButton
-    $cancelIdentity = Get-AutomationElementIdentity $cancelButton
-    if ($trustIdentity -eq $cancelIdentity) {
-        throw 'Trust and cancel resolved to the same UI Automation element.'
-    }
-
-    $trustInvokePattern = $null
-    if (-not $trustButton.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$trustInvokePattern)) {
-        throw 'Trust button does not support InvokePattern.'
-    }
-    $cancelInvokePattern = $null
-    if (-not $cancelButton.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$cancelInvokePattern)) {
-        throw 'Cancel button does not support InvokePattern.'
-    }
-
-    return [pscustomobject]@{
-        Trust = $trustButton
-        Cancel = $cancelButton
-        TrustInvoke = $trustInvokePattern
-        CancelInvoke = $cancelInvokePattern
-    }
-}
-
-function Invoke-TrustDialogAction {
-    param(
-        [Parameter(Mandatory = $true)]$Buttons,
-        [Parameter(Mandatory = $true)][string]$Folder,
-        [Parameter(Mandatory = $true)][ValidateSet('approve', 'cancel')][string]$Action,
-        [string]$Reason
-    )
-    $button = if ($Action -eq 'approve') { $Buttons.Trust } else { $Buttons.Cancel }
-    $invokePattern = if ($Action -eq 'approve') { $Buttons.TrustInvoke } else { $Buttons.CancelInvoke }
-    $buttonName = [string]$button.Current.Name
-    $buttonClass = [string]$button.Current.ClassName
-    $invokePattern.Invoke()
-    $event = if ($Action -eq 'approve') { 'APPROVED' } else { 'CANCELLED' }
-    Write-BridgeLog -Event $event -Data @{
-        folder = $Folder
-        reason = $Reason
-        buttonName = $buttonName
-        buttonClass = $buttonClass
-    }
-}
-
-function Invoke-UiScan {
-    if (-not $EnableUiAutoApprove) { return 0 }
-    $candidates = [Collections.Generic.List[object]]::new()
-    $seenDialogKeys = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-    foreach ($root in Get-CodexRootElements) {
-        $elements = $root.FindAll(
-            [System.Windows.Automation.TreeScope]::Descendants,
-            [System.Windows.Automation.Condition]::TrueCondition
-        )
-        for ($index = 0; $index -lt $elements.Count; $index++) {
-            $element = $elements.Item($index)
-            if ($element.Current.ControlType -ne [System.Windows.Automation.ControlType]::ListItem) { continue }
-            $folder = [string]$element.Current.Name
-            if (-not $folder -or -not [IO.Path]::IsPathFullyQualified($folder)) { continue }
-            $folderKey = Get-CanonicalPath $folder
-            $dialog = Get-DialogAncestor $element
-            if (-not $dialog) { continue }
-            $dialogIdentity = Get-AutomationElementIdentity $dialog
-            $dialogKey = "$folderKey|$dialogIdentity"
-            if (-not $seenDialogKeys.Add($dialogKey)) { continue }
-            [void]$candidates.Add([pscustomobject]@{
-                Folder = $folder
-                FolderKey = $folderKey
-                Dialog = $dialog
-                DialogKey = $dialogKey
-            })
-        }
-    }
-
-    foreach ($dictionary in @($ApprovalCooldown, $CancelCooldown, $RefusalCooldown, $DialogErrorCooldown, $DenialFirstSeen)) {
-        foreach ($key in @($dictionary.Keys)) {
-            if (-not $seenDialogKeys.Contains([string]$key)) { [void]$dictionary.Remove($key) }
-        }
-    }
-
-    foreach ($candidate in $candidates) {
-        $now = [DateTimeOffset]::UtcNow
-        $dialogKey = $candidate.DialogKey
-        if ($ApprovalCooldown.ContainsKey($dialogKey) -and
-            ($now - $ApprovalCooldown[$dialogKey]).TotalSeconds -lt 10) {
-            continue
-        }
-        if ($CancelCooldown.ContainsKey($dialogKey) -and
-            ($now - $CancelCooldown[$dialogKey]).TotalSeconds -lt 10) {
-            continue
-        }
-
-        try {
-            # Validate and resolve both actionable controls before persisting trust.
-            # An ambiguous or changed dialog must not create a durable authorization.
-            $buttons = Get-TrustDialogButtons $candidate.Dialog
-            $validation = Ensure-ManagedTrust $candidate.Folder
-            if (-not $validation.Ok) {
-                $denialState = $DenialFirstSeen[$dialogKey]
-                if ($null -eq $denialState -or [string]$denialState.Reason -ne [string]$validation.Reason) {
-                    $denialState = [pscustomobject]@{ FirstSeen = $now; Reason = [string]$validation.Reason }
-                    $DenialFirstSeen[$dialogKey] = $denialState
-                }
-                if (-not $RefusalCooldown.ContainsKey($dialogKey) -or
-                    ($now - $RefusalCooldown[$dialogKey]).TotalSeconds -ge 30) {
-                    Write-BridgeLog -Event 'REFUSED' -Data @{
-                        folder = $candidate.Folder
-                        reason = $validation.Reason
-                        deniedDialogAction = $DeniedDialogAction
-                        dialogIdentity = $dialogKey
-                    }
-                    $RefusalCooldown[$dialogKey] = $now
-                }
-                if ($DeniedDialogAction -eq 'cancel' -and
-                    ($now - [DateTimeOffset]$denialState.FirstSeen).TotalSeconds -ge $DeniedDialogGraceSeconds) {
-                    Invoke-TrustDialogAction -Buttons $buttons -Folder $candidate.FolderKey -Action cancel -Reason $validation.Reason
-                    $CancelCooldown[$dialogKey] = $now
-                    [void]$DenialFirstSeen.Remove($dialogKey)
-                    Start-Sleep -Milliseconds 350
-                    return 1
-                }
-                continue
-            }
-
-            Invoke-TrustDialogAction -Buttons $buttons -Folder $validation.Path -Action approve
-            $ApprovalCooldown[$dialogKey] = $now
-            [void]$RefusalCooldown.Remove($dialogKey)
-            [void]$DialogErrorCooldown.Remove($dialogKey)
-            [void]$DenialFirstSeen.Remove($dialogKey)
-            [void]$CancelCooldown.Remove($dialogKey)
-            Start-Sleep -Milliseconds 350
-            return 1
-        }
-        catch {
-            if (-not $DialogErrorCooldown.ContainsKey($dialogKey) -or
-                ($now - $DialogErrorCooldown[$dialogKey]).TotalSeconds -ge 30) {
-                Write-BridgeLog -Event 'DIALOG_HANDLER_ERROR' -Data @{
-                    folder = $candidate.Folder
-                    dialogIdentity = $dialogKey
-                    error = $_.Exception.ToString()
-                }
-                $DialogErrorCooldown[$dialogKey] = $now
-            }
-            continue
-        }
-    }
-    return 0
-}
+. (Join-Path $PSScriptRoot 'CodexWorktreeTrustBridge.Supervision.ps1')
 
 try {
-    $HasInstanceMutex = $InstanceMutex.WaitOne(0)
+    try { $HasInstanceMutex = $InstanceMutex.WaitOne(0) }
+    catch [Threading.AbandonedMutexException] { $HasInstanceMutex = $true }
     if (-not $HasInstanceMutex) { exit 0 }
     Write-BridgeLog -Event 'STARTED' -Data @{
         pid = $PID
@@ -851,6 +662,7 @@ try {
         deniedDialogGraceSeconds = $DeniedDialogGraceSeconds
     }
 
+    Initialize-UiSupervisor
     Import-LegacyManagedPaths
     try { Invoke-Reconcile } catch { Write-BridgeLog -Event 'RECONCILE_ERROR' -Data @{ error = $_.Exception.ToString() } }
     $nextReconcile = [Diagnostics.Stopwatch]::StartNew()
@@ -861,11 +673,23 @@ try {
             try { Invoke-Reconcile } catch { Write-BridgeLog -Event 'RECONCILE_ERROR' -Data @{ error = $_.Exception.ToString() } }
             $nextReconcile.Restart()
         }
+        Write-BridgeHealth
         if (-not $Once) { Start-Sleep -Milliseconds $UiPollIntervalMs }
     } while (-not $Once)
 }
 finally {
-    if ($HasInstanceMutex) { [void]$InstanceMutex.ReleaseMutex() }
-    $InstanceMutex.Dispose()
-    $ConfigMutex.Dispose()
+    try {
+        if ($HasInstanceMutex) {
+            try {
+                Stop-UiWorker
+                $Ui.State = 'STOPPED'
+                Write-BridgeHealth -Force
+            }
+            finally { [void]$InstanceMutex.ReleaseMutex() }
+        }
+    }
+    finally {
+        $InstanceMutex.Dispose()
+        $ConfigMutex.Dispose()
+    }
 }

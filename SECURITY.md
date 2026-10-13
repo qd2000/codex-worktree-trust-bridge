@@ -1,5 +1,40 @@
 # Security Policy
 
+## v0.2.2 development status and boundaries
+
+This branch is not an accepted release. Its legacy install/uninstall and live
+installed-task stress paths fail closed before mutation while maintenance is
+being replaced. Do not remove those guards merely to run the old name/substring
+termination implementation with new runtime files.
+
+The new authority process keeps path/Git/deny/TOML policy and config writes. UIA
+objects remain local to a separate MTA worker. Bounded messages carry only
+process/window identities, paths and short-lived tokens, not AutomationElements.
+Both controls and the exact displayed path must still validate before an action.
+An uncertain invocation is durably recorded and not automatically replayed after
+a worker restart. Verified disappearance is required to clear a live dialog's
+action identity. Malformed dialogs are isolated and reported without clicking.
+
+Target selection requires current-user registration of the expected Store
+package and its exact registered executable, not a process name or a
+WindowsApps-looking path. A missing token package identity is permitted only
+with that independently checked registration and Store-origin proof. This is
+not a sandbox against an administrator who can modify trusted installed files.
+
+ConfigMutex serializes cooperating bridge writers. Hash guards detect external
+edits before replacement and preserve the newer file on those conflicts. This
+is not a filesystem compare-and-swap transaction against arbitrary external
+writers; there is still a pre-check/replacement race requiring further review.
+An uncertain replacement must not be blindly retried or rolled back over newer
+content. No claim of complete adversarial concurrent-writer safety is made.
+
+The 256/384 MiB worker soft/hard limits are provisional containment budgets.
+Timeout, budget, peer, protocol and crash failures are observable and recovery
+is bounded; none of this proves the entire underlying UIA leak mechanism.
+There is no forced GC, working-set trimming or periodic whole-bridge restart.
+Private host logs, process command lines, trust configuration, and test artifacts
+remain local and must not be uploaded as public release assets.
+
 ## Supported versions
 
 Only the latest published release is actively supported.
