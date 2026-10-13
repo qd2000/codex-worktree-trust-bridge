@@ -1,40 +1,79 @@
 [CmdletBinding()]
 param()
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $files = @(& git -C $root ls-files --cached --others --exclude-standard -- '*.ps1')
 if ($LASTEXITCODE) { throw 'Cannot enumerate source scripts.' }
 foreach ($file in $files) {
-    $tokens = $null; $errors = $null
+    $tokens = $null
+    $errors = $null
     [void][Management.Automation.Language.Parser]::ParseFile((Join-Path $root $file), [ref]$tokens, [ref]$errors)
     if (@($errors).Count) { throw "PowerShell parse errors in $file : $($errors -join '; ')" }
 }
-$gated = @('Install.ps1', 'Uninstall.ps1', 'tests\InstalledSilentStartup.ps1')
-foreach ($name in $gated) {
-    $path = Join-Path $root $name
-    $tokens = $null; $errors = $null
-    $ast = [Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)
-    $statements = @($ast.EndBlock.Statements)
-    # Never dynamically test an unguarded maintenance entry against this host.
-    # Verify the exact harmless prefix before invoking the expected rejection.
-    if ($statements.Count -lt 3 -or $statements[0].Extent.Text -ne 'Set-StrictMode -Version Latest' -or
-        $statements[1].Extent.Text -ne '$ErrorActionPreference = ''Stop''' -or
-        $statements[2] -isnot [Management.Automation.Language.ThrowStatementAst] -or
-        $statements[2].Extent.Text -notlike '*V022_MAINTENANCE_NOT_ACCEPTED*') {
-        throw "Unsafe test setup: $name is not statically guarded before all maintenance operations."
-    }
-    $refused = $false
-    try { & $path } catch { $refused = $_.Exception.Message -like 'V022_MAINTENANCE_NOT_ACCEPTED:*' }
-    if (-not $refused) { throw "Expected maintenance gate did not refuse $name." }
-}
+
+$legacyTest = Join-Path $root 'tests\InstalledSilentStartup.ps1'
+$legacyRejected = $false
+try { & $legacyTest } catch { $legacyRejected = $_.Exception.Message -like 'V022_LEGACY_LIVE_TEST_DISABLED:*' }
+if (-not $legacyRejected) { throw 'The unsafe legacy live-task test is not fail-closed.' }
+
 $status = Get-Content -LiteralPath (Join-Path $root 'RELEASE_STATUS.json') -Raw | ConvertFrom-Json
-if ($status.releaseAllowed -or $status.deploymentAllowed -or $status.sustainedValidationAccepted) {
-    throw 'This incomplete development checkpoint must not claim release or deployment acceptance.'
+if (-not $status.maintenanceImplementationReady) { throw 'Maintenance implementation readiness was not recorded.' }
+if ($status.releaseAllowed -or $status.deploymentAllowed -or $status.candidateAccepted -or $status.sustainedValidationAccepted) {
+    throw 'This maintenance checkpoint must not claim candidate, sustained, release or deployment acceptance.'
 }
+
 $runtime = Get-Content -LiteralPath (Join-Path $root 'src\CodexWorktreeTrustBridge.ps1') -Raw
 if ($runtime -match 'System\.Windows\.Automation|UIAutomationClient|FindAll\(') { throw 'UIA leaked back into the long-lived authority runtime.' }
+$maintenance = Get-Content -LiteralPath (Join-Path $root 'src\CodexWorktreeTrustBridge.Maintenance.ps1') -Raw
+foreach ($unsafe in @('Stop-Process', 'CommandLine -like', 'Get-Process pwsh', 'Get-Process -Name pwsh')) {
+    if ($maintenance.Contains($unsafe, [StringComparison]::OrdinalIgnoreCase)) { throw "Unsafe broad process-control pattern is present: $unsafe" }
+}
+
 $workflow = Get-Content -LiteralPath (Join-Path $root '.github\workflows\release.yml') -Raw
-if ($workflow -match '\-\-clobber|contents:\s*write') { throw 'The blocked release workflow still permits replacement of published assets.' }
-[pscustomobject]@{ passed = $true; parsedScripts = $files.Count; guardedMutationEntries = $gated.Count
-    releaseBlocked = $true; authorityHasNoUia = $true } | ConvertTo-Json
+if ($workflow -match '\-\-clobber|contents:\s*write') { throw 'The blocked release workflow still permits publication or replacement.' }
+
+. (Join-Path $root 'src\CodexWorktreeTrustBridge.Maintenance.ps1')
+$artifact = Join-Path $root '.artifacts\bin'
+$productionRejected = $false
+try { [void](Test-BridgeArtifactDirectory -ArtifactDirectory $artifact) }
+catch { $productionRejected = $_.Exception.Message -like '*requires a clean accepted artifact*' -or $_.Exception.Message -like '*blocked by release/deployment status*' }
+if (-not $productionRejected) { throw 'The current development artifact was not rejected for production installation.' }
+
+$guardRoot = Join-Path $root ('.artifacts\guard-' + [guid]::NewGuid().ToString('N'))
+try {
+    $productionNameLayout = New-BridgeMaintenanceLayout -TaskName 'Codex-Worktree-Trust-Bridge' `
+        -InstallRoot (Join-Path $guardRoot 'install') -ConfigPath (Join-Path $guardRoot 'bridge.json') `
+        -StatePath (Join-Path $guardRoot 'state.json') -ActionLedgerPath (Join-Path $guardRoot 'actions.json') `
+        -CodexConfigPath (Join-Path $guardRoot 'config.toml') -LogPath (Join-Path $guardRoot 'bridge.log') `
+        -BackupRoot (Join-Path $guardRoot 'backups')
+    $rejected = $false
+    try { Assert-BridgeMaintenanceScope -Layout $productionNameLayout -DevelopmentTest -TestRoot $guardRoot }
+    catch { $rejected = $_.Exception.Message -like '*unique test task name*' }
+    if (-not $rejected) { throw 'DevelopmentTest accepted the production task name.' }
+
+    $escapeLayout = New-BridgeMaintenanceLayout -TaskName ('Codex-Worktree-Trust-Bridge-Test-' + [guid]::NewGuid().ToString('N')) `
+        -InstallRoot (Join-Path ([IO.Path]::GetTempPath()) ('outside-' + [guid]::NewGuid().ToString('N'))) `
+        -ConfigPath (Join-Path $guardRoot 'bridge.json') -StatePath (Join-Path $guardRoot 'state.json') `
+        -ActionLedgerPath (Join-Path $guardRoot 'actions.json') -CodexConfigPath (Join-Path $guardRoot 'config.toml') `
+        -LogPath (Join-Path $guardRoot 'bridge.log') -BackupRoot (Join-Path $guardRoot 'backups')
+    $rejected = $false
+    try { Assert-BridgeMaintenanceScope -Layout $escapeLayout -DevelopmentTest -TestRoot $guardRoot }
+    catch { $rejected = $_.Exception.Message -like '*escapes TestRoot*' }
+    if (-not $rejected) { throw 'DevelopmentTest accepted a mutable path outside TestRoot.' }
+}
+finally {
+    if (Test-Path -LiteralPath $guardRoot) { Remove-Item -LiteralPath $guardRoot -Recurse -Force }
+}
+
+[pscustomobject]@{
+    passed = $true
+    parsedScripts = $files.Count
+    maintenanceImplementationReady = $true
+    productionArtifactRejected = $true
+    developmentScopeGuards = $true
+    releaseBlocked = $true
+    authorityHasNoUia = $true
+    unsafeBroadProcessPatterns = 0
+} | ConvertTo-Json

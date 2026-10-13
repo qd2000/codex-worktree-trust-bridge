@@ -1,65 +1,36 @@
 [CmdletBinding()]
 param(
     [string]$TaskName = 'Codex-Worktree-Trust-Bridge',
-    [switch]$RemoveManagedTrustEntries
+    [string]$TaskPath = '\',
+    [string]$InstallRoot = (Join-Path $env:USERPROFILE '.codex\tools\codex-worktree-trust-bridge'),
+    [string]$ConfigPath = (Join-Path $env:USERPROFILE '.codex\codex-worktree-trust-bridge.json'),
+    [string]$StatePath = (Join-Path $env:USERPROFILE '.codex\state\codex-worktree-trust-bridge.json'),
+    [string]$ActionLedgerPath = (Join-Path $env:USERPROFILE '.codex\state\codex-worktree-trust-bridge.ui-actions.json'),
+    [string]$CodexConfigPath = (Join-Path $env:USERPROFILE '.codex\config.toml'),
+    [string]$LogPath = (Join-Path $env:USERPROFILE '.codex\log\codex-worktree-trust-bridge.log'),
+    [string]$BackupRoot = (Join-Path $env:USERPROFILE '.codex\backups\codex-worktree-trust-bridge\maintenance'),
+    [switch]$RemoveBridgeState,
+    [switch]$RemoveBridgeConfiguration,
+    [switch]$RemoveManagedTrustEntries,
+    [switch]$DevelopmentTest,
+    [string]$TestRoot,
+    [ValidateSet('none', 'after-task-remove', 'after-install-remove')]
+    [string]$TestFailureStep = 'none'
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-
-# The legacy process-substring stop implementation below must be replaced, not
-# enabled merely by changing a readiness flag. No host mutation precedes this.
-throw 'V022_MAINTENANCE_NOT_ACCEPTED: uninstall from this development checkout is disabled until exact-identity stop and rollback are implemented and tested.'
-
-$codexHome = Join-Path $env:USERPROFILE '.codex'
-$installRoot = Join-Path $codexHome 'tools\codex-worktree-trust-bridge'
-$runtimePath = Join-Path $installRoot 'CodexWorktreeTrustBridge.ps1'
-$launcherPath = Join-Path $installRoot 'CodexWorktreeTrustBridge.Launcher.exe'
-$configPath = Join-Path $codexHome 'codex-worktree-trust-bridge.json'
-$statePath = Join-Path $codexHome 'state\codex-worktree-trust-bridge.json'
-$codexConfigPath = Join-Path $codexHome 'config.toml'
-$archiveRoot = Join-Path $codexHome 'tools\_uninstalled'
-$archive = Join-Path $archiveRoot ('codex-worktree-trust-bridge-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
-
-$task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-if ($task) {
-    if ($task.State -eq 'Running') { Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue }
-    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
-}
-
-$shutdownDeadline = (Get-Date).AddSeconds(10)
-do {
-    $bridgeProcesses = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
-        ($_.ExecutablePath -and $_.ExecutablePath -ieq $launcherPath) -or
-        ($_.Name -ieq 'pwsh.exe' -and $_.CommandLine -and $_.CommandLine -like "*$runtimePath*")
-    })
-    if (-not $bridgeProcesses.Count) { break }
-    Start-Sleep -Milliseconds 250
-} while ((Get-Date) -lt $shutdownDeadline)
-
-foreach ($bridgeProcess in $bridgeProcesses) {
-    Stop-Process -Id $bridgeProcess.ProcessId -Force -ErrorAction SilentlyContinue
-}
-
-New-Item -ItemType Directory -Force -Path $archiveRoot | Out-Null
-New-Item -ItemType Directory -Force -Path $archive | Out-Null
-foreach ($path in @($installRoot, $configPath, $statePath)) {
-    if (Test-Path -LiteralPath $path) {
-        Move-Item -LiteralPath $path -Destination $archive -Force
-    }
-}
-
-if ($RemoveManagedTrustEntries -and (Test-Path -LiteralPath $codexConfigPath -PathType Leaf)) {
-    $text = [IO.File]::ReadAllText($codexConfigPath)
-    $begin = [regex]::Escape('# BEGIN CODEX WORKTREE TRUST BRIDGE')
-    $end = [regex]::Escape('# END CODEX WORKTREE TRUST BRIDGE')
-    $updated = [regex]::Replace($text, "(?s)\r?\n?$begin.*?$end\r?\n?", '').TrimEnd() + [Environment]::NewLine
-    [IO.File]::WriteAllText($codexConfigPath, $updated, [Text.UTF8Encoding]::new($false))
-}
-
-[pscustomobject]@{
-    Uninstalled = $true
-    TaskRemoved = -not [bool](Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)
-    Archive = $archive
-    ManagedTrustEntriesRemoved = [bool]$RemoveManagedTrustEntries
-} | ConvertTo-Json
+$module = @(
+    (Join-Path $PSScriptRoot 'CodexWorktreeTrustBridge.Maintenance.ps1'),
+    (Join-Path $PSScriptRoot 'src\CodexWorktreeTrustBridge.Maintenance.ps1')
+) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+if (-not $module) { throw 'Maintenance implementation is missing.' }
+. $module
+$layout = New-BridgeMaintenanceLayout -TaskName $TaskName -TaskPath $TaskPath `
+    -InstallRoot $InstallRoot -ConfigPath $ConfigPath -StatePath $StatePath `
+    -ActionLedgerPath $ActionLedgerPath -CodexConfigPath $CodexConfigPath `
+    -LogPath $LogPath -BackupRoot $BackupRoot
+$result = Invoke-BridgeUninstall -Layout $layout -DevelopmentTest:$DevelopmentTest -TestRoot $TestRoot `
+    -RemoveBridgeState:$RemoveBridgeState -RemoveBridgeConfiguration:$RemoveBridgeConfiguration `
+    -RemoveManagedTrustEntries:$RemoveManagedTrustEntries -TestFailureStep $TestFailureStep
+$result | ConvertTo-Json -Depth 20

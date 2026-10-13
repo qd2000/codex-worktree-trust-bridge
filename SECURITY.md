@@ -2,10 +2,26 @@
 
 ## v0.2.2 development status and boundaries
 
-This branch is not an accepted release. Its legacy install/uninstall and live
-installed-task stress paths fail closed before mutation while maintenance is
-being replaced. Do not remove those guards merely to run the old name/substring
-termination implementation with new runtime files.
+This branch is not an accepted release. Exact-identity backup, stop, installation,
+upgrade, rollback and uninstall now have isolated maintenance coverage, but the
+development artifact remains unaccepted and the release/deployment gates remain
+closed. The old live-production-task stress implementation was removed rather
+than retaining its name/substring process-control behavior.
+
+Maintenance resolves one exact Scheduled Task action and parses its full launcher
+arguments. It owns a launcher only when executable and complete arguments match;
+a runtime must additionally match the expected PowerShell executable, `-File`,
+`-ConfigPath` and parent launcher. PID, executable path and creation time are
+revalidated immediately before forced termination. Ambiguous identity fails
+closed, and same-basename decoys are not terminated.
+
+Candidate files and hashes are verified before task stop. Backups include task
+XML, the complete install directory, local bridge policy/state/action ledger,
+Codex managed block and process identities. Installation uses staged directory
+replacement. Rollback rejects a changed bridge configuration and merges only the
+managed Codex block, preserving unrelated later edits. These protections do not
+override Windows administrators or turn the file system into an adversarial
+transactional database.
 
 The new authority process keeps path/Git/deny/TOML policy and config writes. UIA
 objects remain local to a separate MTA worker. Bounded messages carry only

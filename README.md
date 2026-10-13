@@ -1,15 +1,17 @@
 # Codex Worktree Trust Bridge
 
-> **v0.2.2 development branch — not a release or accepted installation.**
-> Core resource/lifecycle changes and isolated tests are in progress. The legacy
-> install/uninstall/installed-task mutation paths are deliberately blocked in
-> this checkout. The two-hour representative gray run, controlled upgrade and
-> rollback, and release-artifact workflow are not accepted yet. See
+> **v0.2.2 development branch — not a release or accepted production installation.**
+> Core resource/lifecycle changes and the exact-identity maintenance chain have
+> passed isolated tests. Production installation is still blocked by the
+> unaccepted artifact and release/deployment gates. The final Git/reconcile
+> resource work, representative two-hour gray run and release-artifact workflow
+> are not accepted yet. See
 > [development progress](docs/v0.2.2-progress.md) and the
-> [frozen acceptance contract](docs/v0.2.2-acceptance.md).
+> [frozen acceptance contract](docs/v0.2.2-acceptance.md), including the
+> [maintenance-chain contract](docs/v0.2.2-maintenance-acceptance.md).
 > The production `v0.2.1` tag and existing installations are not changed by this
 > development checkout. The installation instructions below describe that
-> previously published release until the v0.2.2 maintenance gate is complete.
+> previously published release until all remaining candidate gates are complete.
 
 [![Windows](https://img.shields.io/badge/platform-Windows-0078D4)](https://www.microsoft.com/windows)
 [![PowerShell 7](https://img.shields.io/badge/PowerShell-7%2B-5391FE)](https://github.com/PowerShell/PowerShell)
@@ -233,6 +235,12 @@ The newest 20 backups are retained. The updated configuration is first written
 to a temporary file and then moved into place. A per-user mutex prevents two
 bridge instances from editing the file concurrently.
 
+The v0.2.2 maintenance implementation also creates a host-local, hash-verified
+upgrade backup before changing an installed task. It includes the complete
+install directory, task XML, bridge configuration/state/action ledger, the
+bridge-owned Codex config block, process identities and rollback receipts.
+Machine-specific policy is not taken from another host or from the package.
+
 To restore a backup:
 
 1. stop `Codex-Worktree-Trust-Bridge`;
@@ -248,9 +256,10 @@ Check the installation:
 pwsh.exe -NoLogo -NoProfile -File .\Status.ps1
 ```
 
-The status command reports the task, launcher/runtime process pair, health
-state, package version, configured roots, trust mode, denied-dialog policy,
-managed path count, hashes, and recent log records.
+The v0.2.2 status command verifies the exact task action, launcher/runtime PID and
+creation times, process receipt, live health, installed manifest and artifact
+hashes. A stale, degraded, resource-unhealthy or uncertain runtime cannot be
+reported as healthy.
 
 The main log is:
 
@@ -272,10 +281,29 @@ Important events include:
 
 ## Upgrade
 
-Pull or download a newer release and run `Install.cmd` again. The installer stops
-the existing task/process, copies the new runtime, recreates the task, and
-verifies startup readiness. Pass custom roots and policy options again when
-upgrading.
+For a future accepted v0.2.2 release, `Install.cmd` first verifies the complete
+artifact before touching the task. It then exports and hashes the original task
+and machine-local files, captures the exact launcher/runtime identity, stops only
+that process tree, performs a same-volume staged install, preserves task settings
+and local configuration, and requires verified readiness. Startup failure
+automatically attempts rollback and reports both the original failure and the
+rollback result.
+
+The current development artifact has `accepted=false`, while release and
+deployment remain disabled in `RELEASE_STATUS.json`; therefore it cannot be used
+for production installation. Isolated maintenance tests use unique temporary task
+names and paths under `.artifacts`.
+
+An installation receipt can be rolled back with:
+
+```powershell
+pwsh.exe -NoLogo -NoProfile -File .\Rollback.ps1 `
+  -InstallReceiptPath <path-to-install-receipt.json>
+```
+
+Rollback verifies the backup, refuses to overwrite a bridge configuration that
+changed after installation, restores the original task and files, and merges the
+original managed Codex block without removing unrelated later edits.
 
 ## Privacy and data handling
 
@@ -303,6 +331,10 @@ By default, uninstalling leaves the current managed trust entries in
 pwsh.exe -NoLogo -NoProfile -File .\Uninstall.ps1 `
   -RemoveManagedTrustEntries
 ```
+
+v0.2.2 uninstall creates and verifies the same host-local backup before removing
+anything. A mid-uninstall failure automatically attempts restoration. Production
+uninstall remains blocked for an unaccepted development installation.
 
 ## Troubleshooting
 
@@ -358,8 +390,10 @@ pwsh.exe -NoLogo -NoProfile -File .\tests\Run-CoreSuite.ps1
 
 It keeps raw output, resource samples, artifact hashes and verified job-cleanup
 receipts under ignored `.artifacts`. The controlled UI fixtures do not modify
-the user's Codex trust configuration or click business dialogs. A core-suite
-pass is not installation, rollback, two-hour stability, or release acceptance.
+the user's Codex trust configuration or click business dialogs. The maintenance
+group uses unique temporary Scheduled Tasks and verifies that the production task,
+process creation identities and hashes are unchanged. A core-suite pass is not a
+production installation, two-hour stability, release or deployment acceptance.
 See `docs/v0.2.2-progress.md` for the remaining gates and evidence scope.
 
 Parse all PowerShell files:
@@ -384,12 +418,12 @@ ordinary directory, preserves an existing double-quoted TOML project table
 without creating a duplicate, rejects a junction, and removes all temporary
 files.
 
-The old live-installed-task stress entry below is retained for reference but is
-**blocked before mutation in this development branch**. Its stop/restart logic
-must be replaced by exact-identity, backed-up maintenance tests before use:
+The old live-production-task stress test has been removed. Use the isolated
+maintenance matrix instead:
 
 ```powershell
-pwsh.exe -NoLogo -NoProfile -File .\tests\InstalledSilentStartup.ps1 -Iterations 5
+pwsh.exe -NoLogo -NoProfile -File .\tests\Run-Bounded.ps1 `
+  -TestFile tests\MaintenanceLifecycle.ps1 -Seconds 600 -MemoryMiB 768
 ```
 
 ## Releases

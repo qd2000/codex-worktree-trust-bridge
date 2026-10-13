@@ -24,11 +24,20 @@ The project follows semantic versioning.
   for status; a recent reconcile alone is not sufficient for `HEALTHY`.
 - Add bounded lifecycle, controlled-dialog, fault-injection, authority/config,
   and old/new observation-only resource tests.
+- Add exact task-action/process-birth identity for maintenance stops; no image-
+  name, basename, wildcard or command-line-substring process termination is used.
+- Add hash-verified host-local backups, same-volume staged installation,
+  machine-specific configuration preservation, startup-readiness verification,
+  explicit rollback, automatic failed-start rollback and automatic failed-
+  uninstall rollback.
+- Add rollback conflict protection for bridge configuration and managed-block
+  merge semantics that preserve unrelated later Codex configuration edits.
+- Add an isolated eleven-case maintenance matrix covering corrupt artifacts,
+  ambiguous identity, v0.2.1 residual cleanup, status degradation, crashes,
+  explicit/automatic rollback, concurrent edits and fresh install/uninstall.
 
-### Release blockers
+### Remaining release blockers
 
-- Exact-identity maintenance, backup/upgrade/rollback and their controlled tests
-  are unfinished. Legacy mutation entry points are blocked, not repurposed.
 - Git/reconcile-only resource comparison and at least two continuous hours of
   representative gray observation against a frozen final artifact are pending.
 - A single accepted binary artifact must be used by the release and all hosts.
