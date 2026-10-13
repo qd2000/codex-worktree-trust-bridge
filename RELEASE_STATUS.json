@@ -12,8 +12,9 @@
   "sustainedValidationAccepted": false,
   "releaseAllowed": false,
   "deploymentAllowed": false,
-  "supersededManifestSha256": "7984b09e8033be0489a59b7690528d66e5b598b6786d895ef7c6c7bbe20b1308",
+  "supersededManifestSha256": "86c2157f96788459573c6918b1b530f454375c5b359d1e8b35d3c4d4902a210b",
+  "supersededReason": "QDSPC gray validator treated a naturally exited short-lived descendant as a bridge identity failure; QDSPC was rolled back and fleet deployment never started.",
   "replacementRequiresFreshGrayAuthorization": true,
-  "state": "replacement-final-candidate-accepted-for-qdspc-canary; fleet-requires-new-gray-authorization; release-blocked",
+  "state": "gray-transient-descendant-sampling-fix-focused-tests-passed; final-clean-suite-and-live-cadence-required-before-freeze; fleet-release-blocked",
   "continuation": "docs/v0.2.2-progress.md"
 }

@@ -22,15 +22,37 @@ if (-not (Test-Path -LiteralPath $module)) { $module = Join-Path $PSScriptRoot '
 if (-not (Test-Path -LiteralPath $module)) { throw 'Maintenance implementation is missing.' }
 . $module
 
-function Get-GrayProcessResource {
+function Test-GrayProcessIdentityGone {
     param([Parameter(Mandatory)]$Identity)
+    $probe = $null
+    try {
+        $probe = [Diagnostics.Process]::GetProcessById([int]$Identity.pid)
+        [void]$probe.Handle
+        if ($probe.HasExited) { return $true }
+        return $probe.StartTime.ToUniversalTime().ToFileTimeUtc() -ne [long]$Identity.creationFileTimeUtc
+    }
+    catch {
+        $base = $_.Exception.GetBaseException()
+        if ($base -is [ArgumentException] -or $base -is [InvalidOperationException]) { return $true }
+        throw
+    }
+    finally { if ($null -ne $probe) { $probe.Dispose() } }
+}
+
+function Get-GrayProcessResource {
+    param([Parameter(Mandatory)]$Identity, [switch]$AllowMissing)
     $process = $null
     try {
         $process = [Diagnostics.Process]::GetProcessById([int]$Identity.pid)
         [void]$process.Handle
-        if ($process.HasExited -or $process.StartTime.ToUniversalTime().ToFileTimeUtc() -ne [long]$Identity.creationFileTimeUtc -or
-            (ConvertTo-BridgeCanonicalPath $process.MainModule.FileName) -ine [string]$Identity.executablePath) {
+        if ($process.HasExited -or $process.StartTime.ToUniversalTime().ToFileTimeUtc() -ne [long]$Identity.creationFileTimeUtc) {
+            if ($AllowMissing) { return $null }
             throw "Process identity changed during gray observation: $($Identity.pid)"
+        }
+        if ((ConvertTo-BridgeCanonicalPath $process.MainModule.FileName) -ine [string]$Identity.executablePath) {
+            # A live process with the same birth identity but another executable
+            # is not ordinary churn and must never be silently excluded.
+            throw "Process executable identity changed during gray observation: $($Identity.pid)"
         }
         $process.Refresh()
         return [pscustomobject]@{
@@ -40,6 +62,10 @@ function Get-GrayProcessResource {
             workingSetBytes = $process.WorkingSet64
             handles = $process.HandleCount
         }
+    }
+    catch {
+        if ($AllowMissing -and (Test-GrayProcessIdentityGone -Identity $Identity)) { return $null }
+        throw
     }
     finally { if ($null -ne $process) { $process.Dispose() } }
 }
@@ -196,7 +222,20 @@ try {
             $set = $status.ProcessSet
             $launcher = Get-GrayProcessResource $set.Launcher
             $runtime = Get-GrayProcessResource $set.Runtime
-            $descendants = @($set.Descendants | ForEach-Object { Get-GrayProcessResource $_ })
+            $descendants = [Collections.Generic.List[object]]::new()
+            $transientDescendantsSkipped = 0
+            foreach ($identity in @($set.Descendants)) {
+                $resource = Get-GrayProcessResource -Identity $identity -AllowMissing
+                if ($null -eq $resource) {
+                    # Git and console descendants may complete between the exact
+                    # tree snapshot and resource read. At sampling time they no
+                    # longer consume resources, so exclude only that exact stale
+                    # identity and retain an observable counter.
+                    $transientDescendantsSkipped++
+                    continue
+                }
+                $descendants.Add($resource)
+            }
             $descendantPrivate = [long](($descendants | Measure-Object -Property privateBytes -Sum).Sum)
             $descendantWorking = [long](($descendants | Measure-Object -Property workingSetBytes -Sum).Sum)
             $descendantHandles = [long](($descendants | Measure-Object -Property handles -Sum).Sum)
@@ -213,6 +252,7 @@ try {
                 launcherHandles = $launcher.handles; runtimeHandles = $runtime.handles; descendantHandles = $descendantHandles
                 aggregateHandles = [long]$launcher.handles + [long]$runtime.handles + $descendantHandles
                 descendantCount = $descendants.Count
+                transientDescendantsSkipped = $transientDescendantsSkipped
                 managedHeapBytes = [long]$status.Health.parent.managedHeapBytes
                 reconcileCount = [long]$status.Health.reconcileCount
                 gitCommandCount = [long]$status.Health.git.commandCount
@@ -284,6 +324,7 @@ try {
             runtimePrivateSlopeMiBPerMinute = $runtimePrivateSlope
             launcherPrivateSlopeMiBPerMinute = $launcherPrivateSlope
             descendantPrivateSlopeMiBPerMinute = $descendantPrivateSlope
+            transientDescendantSamplesSkipped = [long](($rows | Measure-Object -Property transientDescendantsSkipped -Sum).Sum)
             previous15MinuteMedianPrivateBytes = $previousMedian; final15MinuteMedianPrivateBytes = $lastMedian
             reconcileDelta = $reconcileDelta; gitCommandDelta = $gitCommandDelta; uiScanDelta = $uiScanDelta
             postWarmupWorkerGenerations = $postWarmupGenerations

@@ -53,6 +53,10 @@ The project follows semantic versioning.
   real two-root host completed a read-only reconcile in about 87 seconds.
 - Add clean-candidate freeze receipts, a QDSPC-only two-hour gray validator and
   exact-manifest authorization required before Local/T113 deployment.
+- Treat only a short-lived descendant that exits after an exact process-tree
+  snapshot as absent at resource-sampling time, record the skipped identity,
+  and continue to fail on Launcher/Runtime loss, live executable mismatch or
+  other identity uncertainty.
 - Add non-clobbering publication of the previously frozen ZIP after QDSPC gray
   authorization; GitHub does not rebuild the tested asset.
 
@@ -67,6 +71,9 @@ The project follows semantic versioning.
 - The first frozen candidate was revoked after Local exposed stale `.git`
   markers. Local's automatic rollback succeeded and T113 was not touched; a
   replacement candidate and a new QDSPC gray authorization are required.
+- A later replacement was revoked during QDSPC gray because the validator raced
+  a naturally completed Git descendant. The bridge itself remained healthy,
+  QDSPC rollback succeeded, and no fleet host was modified.
 
 ## [0.2.1] - 2026-10-06
 

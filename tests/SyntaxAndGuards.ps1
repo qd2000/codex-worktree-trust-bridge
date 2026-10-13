@@ -20,9 +20,15 @@ if (-not $legacyRejected) { throw 'The unsafe legacy live-task test is not fail-
 
 $status = Get-Content -LiteralPath (Join-Path $root 'RELEASE_STATUS.json') -Raw | ConvertFrom-Json
 if (-not $status.maintenanceImplementationReady) { throw 'Maintenance implementation readiness was not recorded.' }
-if (-not $status.gitReconcileImplementationReady -or -not $status.candidateAccepted -or
-    -not $status.canaryDeploymentAllowed -or -not $status.fleetDeploymentRequiresGrayAuthorization) {
-    throw 'Final candidate/canary/gray-authorization gates are not recorded.'
+if (-not $status.gitReconcileImplementationReady -or -not $status.fleetDeploymentRequiresGrayAuthorization) {
+    throw 'Git/reconcile or gray-authorization gates are not recorded.'
+}
+if ([bool]$status.candidateAccepted -ne [bool]$status.canaryDeploymentAllowed) {
+    throw 'Candidate acceptance and canary permission disagree.'
+}
+if (-not [bool]$status.candidateAccepted -and
+    ([string]$status.state).IndexOf('suite-pending', [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+    throw 'A revoked or in-progress candidate is missing an explicit pending-suite state.'
 }
 if ($status.releaseAllowed -or $status.deploymentAllowed -or $status.sustainedValidationAccepted) {
     throw 'Release, fleet deployment and sustained acceptance must remain false before the qdspc gray run.'
@@ -49,7 +55,8 @@ $workflow = Get-Content -LiteralPath (Join-Path $root '.github\workflows\release
 if ($workflow -match '\-\-clobber|contents:\s*write') { throw 'The blocked release workflow still permits publication or replacement.' }
 $grayValidator = Get-Content -LiteralPath (Join-Path $root 'Validate-Gray.ps1') -Raw
 foreach ($required in @('DurationMinutes = 120', '$usable.Count -lt 200', 'cleanupVerified',
-    'fleetDeploymentAllowed = $true', 'reconcileCount -ge ($preCleanupReconcile + 2)')) {
+    'fleetDeploymentAllowed = $true', 'reconcileCount -ge ($preCleanupReconcile + 2)',
+    'AllowMissing', 'transientDescendantSamplesSkipped')) {
     if (-not $grayValidator.Contains($required, [StringComparison]::Ordinal)) {
         throw "Gray validator is missing required gate: $required"
     }

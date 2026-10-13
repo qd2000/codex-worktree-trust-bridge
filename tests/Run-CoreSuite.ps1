@@ -21,6 +21,7 @@ $tests = @(
     @{ Path = 'tests\AuthorityIntegration.ps1'; Seconds = 180; MemoryMiB = 512 },
     @{ Path = 'tests\GitReconcileBoundaries.ps1'; Seconds = 600; MemoryMiB = 768 },
     @{ Path = 'tests\GrayAuthorizationSmoke.ps1'; Seconds = 180; MemoryMiB = 512 },
+    @{ Path = 'tests\GrayTransientDescendant.ps1'; Seconds = 180; MemoryMiB = 512 },
     @{ Path = 'tests\MaintenanceMoveRetry.ps1'; Seconds = 180; MemoryMiB = 512 },
     @{ Path = 'tests\MaintenanceLifecycle.ps1'; Seconds = 600; MemoryMiB = 768 }
 )
