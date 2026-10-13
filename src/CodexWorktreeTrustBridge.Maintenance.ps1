@@ -165,6 +165,55 @@ function Copy-BridgeAtomicFile {
     }
 }
 
+function Move-BridgeDirectoryBounded {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Source,
+        [Parameter(Mandatory)][string]$Destination,
+        [ValidateRange(100,30000)][int]$TimeoutMilliseconds = 10000
+    )
+    $sourceValue = ConvertTo-BridgeCanonicalPath $Source
+    $destinationValue = ConvertTo-BridgeCanonicalPath $Destination
+    if (-not (Test-Path -LiteralPath $sourceValue -PathType Container)) {
+        throw "Directory move source is missing: $sourceValue"
+    }
+    if (Test-Path -LiteralPath $destinationValue) {
+        throw "Directory move destination already exists: $destinationValue"
+    }
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    $attempt = 0
+    while ($true) {
+        try {
+            [IO.Directory]::Move($sourceValue, $destinationValue)
+            return
+        }
+        catch {
+            $failure = $_
+            $baseException = $failure.Exception.GetBaseException()
+            if ($baseException -isnot [IO.IOException] -and
+                $baseException -isnot [UnauthorizedAccessException]) {
+                throw $failure
+            }
+            $sourceStillExists = Test-Path -LiteralPath $sourceValue -PathType Container
+            $destinationExists = Test-Path -LiteralPath $destinationValue
+            if (-not $sourceStillExists -or $destinationExists) {
+                throw "Directory move outcome is uncertain after an I/O failure: sourceExists=$sourceStillExists destinationExists=$destinationExists. $($baseException.Message)"
+            }
+            $code = $baseException.HResult -band 0xffff
+            # Directory.Move reports a child handle without FILE_SHARE_DELETE as
+            # either Win32 5, 32 or 33 depending on the .NET/Windows path. Retry
+            # only while the source/destination observation proves no rename was
+            # applied. Permanent ACL denial remains bounded by the same deadline.
+            if ($code -notin @(5,32,33) -or $clock.ElapsedMilliseconds -ge $TimeoutMilliseconds) {
+                throw $failure
+            }
+            $delay = [Math]::Min(500, 25 * [Math]::Pow(2, [Math]::Min($attempt, 5)))
+            Start-Sleep -Milliseconds ([int]$delay)
+            $attempt++
+        }
+    }
+}
+
 function New-BridgeMaintenanceLayout {
     [CmdletBinding()]
     param(
@@ -848,10 +897,10 @@ function Set-BridgeInstallDirectory {
     try {
         Copy-BridgeArtifactStage -Artifact $Artifact -StageDirectory $stage
         if (Test-Path -LiteralPath $Layout.installRoot) {
-            Move-Item -LiteralPath $Layout.installRoot -Destination $quarantine
+            Move-BridgeDirectoryBounded -Source $Layout.installRoot -Destination $quarantine
             $movedCurrent = $true
         }
-        Move-Item -LiteralPath $stage -Destination $Layout.installRoot
+        Move-BridgeDirectoryBounded -Source $stage -Destination $Layout.installRoot
         Test-BridgeDirectoryAgainstEntries -Root $Layout.installRoot -Entries (@($Artifact.Entries) + @([pscustomobject]@{
             path = 'manifest.json'; sha256 = $Artifact.ManifestSha256
         }))
@@ -860,7 +909,7 @@ function Set-BridgeInstallDirectory {
     catch {
         $failure = $_
         if (-not (Test-Path -LiteralPath $Layout.installRoot) -and $movedCurrent -and (Test-Path -LiteralPath $quarantine)) {
-            Move-Item -LiteralPath $quarantine -Destination $Layout.installRoot
+            Move-BridgeDirectoryBounded -Source $quarantine -Destination $Layout.installRoot
         }
         throw $failure
     }
@@ -1081,16 +1130,16 @@ function Restore-BridgeInstallDirectory {
             Test-BridgeDirectoryAgainstEntries -Root $stage -Entries @($Backup.Receipt.install.entries)
         }
         if (Test-Path -LiteralPath $Layout.installRoot) {
-            Move-Item -LiteralPath $Layout.installRoot -Destination $quarantine
+            Move-BridgeDirectoryBounded -Source $Layout.installRoot -Destination $quarantine
             $movedCurrent = $true
         }
-        if ([bool]$Backup.Receipt.install.existed) { Move-Item -LiteralPath $stage -Destination $Layout.installRoot }
+        if ([bool]$Backup.Receipt.install.existed) { Move-BridgeDirectoryBounded -Source $stage -Destination $Layout.installRoot }
         if ($movedCurrent -and (Test-Path -LiteralPath $quarantine)) { Remove-Item -LiteralPath $quarantine -Recurse -Force }
     }
     catch {
         $failure = $_
         if (-not (Test-Path -LiteralPath $Layout.installRoot) -and $movedCurrent -and (Test-Path -LiteralPath $quarantine)) {
-            Move-Item -LiteralPath $quarantine -Destination $Layout.installRoot
+            Move-BridgeDirectoryBounded -Source $quarantine -Destination $Layout.installRoot
         }
         throw $failure
     }

@@ -32,6 +32,9 @@ The project follows semantic versioning.
   uninstall rollback.
 - Add rollback conflict protection for bridge configuration and managed-block
   merge semantics that preserve unrelated later Codex configuration edits.
+- Retry install-directory renames only for bounded Windows sharing/access
+  conflicts while the source still exists and destination is still absent;
+  uncertain or permanent outcomes continue to fail closed.
 - Add an isolated eleven-case maintenance matrix covering corrupt artifacts,
   ambiguous identity, v0.2.1 residual cleanup, status degradation, crashes,
   explicit/automatic rollback, concurrent edits and fresh install/uninstall.

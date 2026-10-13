@@ -59,6 +59,13 @@ malformed output, and every other non-zero exit remain critical: reconcile fails
 and the previous managed configuration is preserved. Skipping the stale marker
 does not broaden an allowed root or approve that path.
 
+Install and rollback directory renames can encounter a short Windows handle-
+release delay after exact process exit. The maintenance path retries only Win32
+5/32/33 while observing that the complete source directory still exists and the
+destination does not. Any changed source/destination observation is treated as
+an uncertain mutation, and permanent access denial remains bounded by the move
+deadline rather than being ignored.
+
 Git commands are independently created inside a kill-on-close Job Object. Only
 the three standard handles are inherited. Stdout/stderr are captured in bounded
 temporary files and decoded with strict UTF-8; command time, cleanup time,
