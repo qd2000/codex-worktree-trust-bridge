@@ -61,6 +61,19 @@ $PackageVersion = (Get-Content -LiteralPath (Join-Path $root 'VERSION') -Raw).Tr
 $SourceManifestHash = (Get-FileHash -LiteralPath (Join-Path $bin 'manifest.json') -Algorithm SHA256).Hash
 $LauncherProcessId = $null; $EnableUiAutoApprove = $true
 $LastReconcileSucceeded = $true; $ReconcileCount = 1; $ConfigWriteUncertain = $false
+$ReconcileInProgress = $false; $LastReconcileStartedUtc = $null
+$LastReconcileDurationMs = 0L; $LastReconcileFailure = $null
+$ReconcileTimeoutSeconds = 30; $ReconcileBudget = @{}
+$GitCommandTimeoutMs = 10000; $GitCleanupTimeoutMs = 5000
+$GitMaximumStandardOutputBytes = 262144; $GitMaximumStandardErrorBytes = 65536
+$GitJobMemoryMiB = 128; $GitProcessLimit = 8
+$GitMetrics = [ordered]@{
+    commandCount = 0L; failureCount = 0L; timeoutCount = 0L; outputLimitCount = 0L
+    invalidUtf8Count = 0L; cleanupFailureCount = 0L; activeCount = 0
+    lastDurationMs = 0L; maximumDurationMs = 0L; lastExitCode = 0
+    lastFailureKind = $null; lastFailure = $null; lastFailureUtc = $null
+    lastCleanupVerified = $true; peakJobMemoryBytes = 0L; maximumActiveProcesses = 0
+}
 function Write-BridgeLog {
     param([string]$Event, [hashtable]$Data)
     @{ event = $Event; data = $Data; utc = [DateTime]::UtcNow.ToString('o') } | ConvertTo-Json -Depth 10 -Compress |
