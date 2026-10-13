@@ -418,7 +418,7 @@ trust_level = "trusted"
     $editedConfig = Read-BridgeJson -Path $layout.configPath
     $editedConfig.externalConcurrentEdit = 'do-not-overwrite'
     Write-BridgeAtomicJson -Path $layout.configPath -Value $editedConfig
-    $pairBeforeConflict = (Get-BridgeInstalledStatus -Layout $layout).ProcessSet
+    $pairBeforeConflict = (Wait-BridgeReady -Layout $layout -TimeoutSeconds 20).ProcessSet
     $conflictRollbackArgs = @('-InstallReceiptPath', $upgrade2.ReceiptPath) + (Get-LayoutArguments $layout) + @('-TimeoutSeconds', '30')
     [void](Invoke-ToolProcess -Script (Join-Path $root 'Rollback.ps1') -Arguments $conflictRollbackArgs -ExpectSuccess:$false)
     $pairAfterConflict = (Get-BridgeInstalledStatus -Layout $layout).ProcessSet
