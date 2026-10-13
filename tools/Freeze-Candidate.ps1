@@ -14,7 +14,7 @@ $suitePath = ConvertTo-BridgeCanonicalPath $SuiteReceiptPath
 $suite = Read-BridgeJson -Path $suitePath -MaximumBytes 4194304
 if (-not [bool]$suite.passed -or [int]$suite.testCount -ne [int]$suite.expectedTestCount -or
     [int]$suite.expectedTestCount -lt 12 -or
-    [string]$suite.artifactManifestSha256 -cne $artifact.ManifestSha256 -or
+    ([string]$suite.artifactManifestSha256).ToLowerInvariant() -cne $artifact.ManifestSha256.ToLowerInvariant() -or
     [string]$suite.maintenanceAcceptance -cne 'ISOLATED_MAINTENANCE_CHAIN_PASSED_PRODUCTION_NOT_RUN' -or
     [string]$suite.gitReconcileAcceptance -cne 'ISOLATED_BOUNDED_GIT_RECONCILE_PASSED_WHEN_SUITE_PASSES' -or
     @($suite.receipts | Where-Object { -not [bool]$_.passed -or -not [bool]$_.cleanupVerified }).Count) {
