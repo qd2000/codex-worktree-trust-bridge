@@ -88,11 +88,16 @@ function Assert-NoFixtureProcess {
             $process = $null
             try {
                 $process = [Diagnostics.Process]::GetProcessById($pair[0])
-                if (-not $process.HasExited -and $process.StartTime.ToUniversalTime().ToFileTimeUtc() -eq $pair[1]) {
+                [void]$process.Handle
+                if ($process.HasExited) { continue }
+                $start = $process.StartTime
+                if ($null -ne $start -and $start.ToUniversalTime().ToFileTimeUtc() -eq $pair[1]) {
                     throw "Controlled Git process remains alive: $($pair[0])."
                 }
             }
             catch [ArgumentException] { }
+            catch [InvalidOperationException] { }
+            catch [ComponentModel.Win32Exception] { }
             finally { if ($null -ne $process) { $process.Dispose() } }
         }
     }

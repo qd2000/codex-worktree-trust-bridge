@@ -333,12 +333,16 @@ function Test-RegisteredGitWorktree {
     if (-not $directoryValidation.Ok) { return $false }
     try {
         $canonical = $directoryValidation.Path
-        $topLines = @(Invoke-GitLines -WorkingDirectory $canonical -Arguments @('rev-parse', '--show-toplevel') -Critical:$ReconcileInProgress)
+        # A plain non-zero result here means this candidate is stale or not a
+        # registered worktree and may be skipped. Invoke-GitLines still marks
+        # timeout/output/UTF-8/cleanup/start failures as critical infrastructure
+        # failures for the active reconcile.
+        $topLines = @(Invoke-GitLines -WorkingDirectory $canonical -Arguments @('rev-parse', '--show-toplevel'))
         if ($topLines.Count -ne 1) { return $false }
         $top = $topLines[0]
         if (-not [IO.Path]::IsPathFullyQualified($top) -or (Get-CanonicalPath $top) -ne $canonical) { return $false }
         $registered = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-        foreach ($line in Invoke-GitLines -WorkingDirectory $canonical -Arguments @('worktree', 'list', '--porcelain') -Critical:$ReconcileInProgress) {
+        foreach ($line in Invoke-GitLines -WorkingDirectory $canonical -Arguments @('worktree', 'list', '--porcelain')) {
             if ($line -match '^worktree\s+(.+)$') {
                 $candidate = $Matches[1].Trim()
                 if (-not [IO.Path]::IsPathFullyQualified($candidate)) { return $false }
