@@ -4,9 +4,9 @@ All notable changes to this project are documented in this file.
 
 The project follows semantic versioning.
 
-## [0.2.2] - Unreleased; implementation and acceptance incomplete
+## [0.2.2] - 2026-10-14
 
-### Implemented in the development branch
+### Added and changed
 
 - Atomically create the runtime in a kill-on-close Windows Job Object, including
   the pre-resume ownership window; reject duplicate launchers and publish
@@ -60,20 +60,35 @@ The project follows semantic versioning.
 - Add non-clobbering publication of the previously frozen ZIP after QDSPC gray
   authorization; GitHub does not rebuild the tested asset.
 
-### Remaining operational gates
+### Release validation and rollout
 
-- A clean complete suite must pass and exactly one candidate archive must be
-  frozen. Focused test passes do not authorize deployment.
-- QDSPC must then pass at least two continuous representative hours against that
-  exact manifest. Failure requires QDSPC rollback and stops expansion.
-- Local and T113 may be upgraded sequentially only with the QDSPC gray receipt.
-  No tag, GitHub release or production rollout is claimed by these source changes.
-- The first frozen candidate was revoked after Local exposed stale `.git`
-  markers. Local's automatic rollback succeeded and T113 was not touched; a
-  replacement candidate and a new QDSPC gray authorization are required.
-- A later replacement was revoked during QDSPC gray because the validator raced
-  a naturally completed Git descendant. The bridge itself remained healthy,
-  QDSPC rollback succeeded, and no fleet host was modified.
+- The final clean source is commit
+  `668c5e4c09d32267bbf91a59117e22bf3bce4771`; the accepted manifest SHA-256 is
+  `832cbf8eb7eddf7eb67695102b57d6823e2a1073ce5f1135a7c6ed4063c60dc6`.
+- The byte-identical published ZIP has SHA-256
+  `a373662471719eb69d5371886b1b051d47d82138c5ed71b7330e0237ba35866e`.
+- The final candidate passed the complete 14-group bounded suite, exact
+  maintenance/rollback tests and live UI cadence checks.
+- A representative two-hour canary run recorded 220 post-warm-up samples,
+  174,813,184-byte aggregate Private Bytes peak, 0.0341 MiB/minute aggregate
+  growth slope, 1,360-handle peak, no Git timeout/output/cleanup failure and
+  verified removal of the controlled workload.
+- The same manifest was deployed sequentially to three Windows hosts. Each host
+  retained its own allowlist and trust/dialog policy, reported `HEALTHY`, had no
+  v0.2.1 process residue and retained a hash-verified rollback backup.
+- The annotated `v0.2.2` tag and GitHub Release point to the accepted source and
+  exact canary-tested asset; GitHub did not rebuild the archive.
+
+### Historical pre-release findings
+
+- An earlier candidate was revoked after a broad real-world root exposed stale
+  `.git` markers. Automatic rollback succeeded and rollout stopped before the
+  next host. The final implementation skips only Git's exact bounded
+  `not a git repository` result; all other failures remain reconcile-critical.
+- A later candidate was revoked when the gray validator raced a naturally exited
+  short-lived Git descendant. The bridge stayed healthy and rollback succeeded.
+  The final validator tolerates only a descendant proven to have exited after an
+  exact process-tree snapshot; Launcher or Runtime identity loss still fails.
 
 ## [0.2.1] - 2026-10-06
 

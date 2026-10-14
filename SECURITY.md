@@ -1,12 +1,15 @@
 # Security Policy
 
-## v0.2.2 development status and boundaries
+## v0.2.2 release boundaries
 
-This branch is not an accepted release. Exact-identity backup, stop, installation,
-upgrade, rollback and uninstall now have isolated maintenance coverage, but the
-development artifact remains unaccepted and the release/deployment gates remain
-closed. The old live-production-task stress implementation was removed rather
-than retaining its name/substring process-control behavior.
+v0.2.2 is the current accepted release. It passed exact-identity maintenance,
+bounded Git/reconcile, controlled UI, fault-isolation and rollback coverage, a
+two-hour representative canary run, and sequential verification on three Windows
+hosts. The released source, manifest, archive and validation identities are
+recorded in `docs/v0.2.2-release-and-deployment.md`.
+
+The old live-production-task stress implementation was removed rather than
+retaining its name/substring process-control behavior.
 
 Maintenance resolves one exact Scheduled Task action and parses its full launcher
 arguments. It owns a launcher only when executable and complete arguments match;
@@ -44,7 +47,8 @@ writers; there is still a pre-check/replacement race requiring further review.
 An uncertain replacement must not be blindly retried or rolled back over newer
 content. No claim of complete adversarial concurrent-writer safety is made.
 
-The 256/384 MiB worker soft/hard limits are provisional containment budgets.
+The 256/384 MiB worker soft/hard limits are enforced containment budgets validated
+by the v0.2.2 canary and fleet checks.
 Timeout, budget, peer, protocol and crash failures are observable and recovery
 is bounded; none of this proves the entire underlying UIA leak mechanism.
 There is no forced GC, working-set trimming or periodic whole-bridge restart.
@@ -76,14 +80,14 @@ worktree and command counts. An incomplete discovery preserves the previous
 managed trust state and forces unhealthy status until a complete run succeeds.
 
 Canary and fleet installation are separate authorities. A clean accepted
-candidate can be installed first only on QDSPC. Local/T113 require a QDSPC gray
-authorization bound to the exact manifest and source commit. The receipt must
-contain at least two hours, 200 usable post-warm-up samples, resource/activity/
-integrity passes and verified removal of the controlled Git workload from disk,
-bridge state and Codex configuration. Failed or partially cleaned gray runs
-cannot authorize fleet deployment. Publication refuses existing tags/releases
-and uploads only the frozen archive tested on QDSPC; it does not rebuild or
-replace an existing asset.
+candidate is installed first on the designated canary host. Remaining hosts
+require a canary gray authorization bound to the exact manifest and source commit.
+The receipt must contain at least two hours, 200 usable post-warm-up samples,
+resource/activity/integrity passes and verified removal of the controlled Git
+workload from disk, bridge state and Codex configuration. Failed or partially
+cleaned gray runs cannot authorize fleet deployment. Publication refuses existing
+tags/releases and uploads only the frozen archive tested on the canary host; it
+does not rebuild or replace an existing asset.
 
 ## Supported versions
 

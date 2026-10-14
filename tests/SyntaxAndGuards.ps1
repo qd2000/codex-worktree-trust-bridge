@@ -26,12 +26,26 @@ if (-not $status.gitReconcileImplementationReady -or -not $status.fleetDeploymen
 if ([bool]$status.candidateAccepted -ne [bool]$status.canaryDeploymentAllowed) {
     throw 'Candidate acceptance and canary permission disagree.'
 }
-if (-not [bool]$status.candidateAccepted -and
+if ([string]$status.state -ceq 'released-and-deployed') {
+    foreach ($requiredBoolean in @('sustainedValidationAccepted', 'releaseAllowed',
+        'deploymentAllowed', 'releasePublished', 'fleetDeploymentCompleted')) {
+        if (-not [bool]$status.$requiredBoolean) {
+            throw "Final release status is missing required acceptance: $requiredBoolean"
+        }
+    }
+    foreach ($requiredHash in @('sourceCommit', 'manifestSha256', 'archiveSha256', 'grayAuthorizationSha256')) {
+        if ([string]$status.$requiredHash -notmatch '^[a-f0-9]{40}$|^[a-f0-9]{64}$') {
+            throw "Final release status is missing a valid identity: $requiredHash"
+        }
+    }
+    if ([int]$status.verifiedHostCount -lt 3 -or
+        -not (Test-Path -LiteralPath (Join-Path $root ([string]$status.report)) -PathType Leaf)) {
+        throw 'Final release status is missing fleet verification or its public report.'
+    }
+}
+elseif (-not [bool]$status.candidateAccepted -and
     ([string]$status.state).IndexOf('suite-pending', [StringComparison]::OrdinalIgnoreCase) -lt 0) {
     throw 'A revoked or in-progress candidate is missing an explicit pending-suite state.'
-}
-if ($status.releaseAllowed -or $status.deploymentAllowed -or $status.sustainedValidationAccepted) {
-    throw 'Release, fleet deployment and sustained acceptance must remain false before the qdspc gray run.'
 }
 
 $runtime = Get-Content -LiteralPath (Join-Path $root 'src\CodexWorktreeTrustBridge.ps1') -Raw
@@ -51,8 +65,10 @@ foreach ($unsafe in @('Stop-Process', 'CommandLine -like', 'Get-Process pwsh', '
     if ($maintenance.Contains($unsafe, [StringComparison]::OrdinalIgnoreCase)) { throw "Unsafe broad process-control pattern is present: $unsafe" }
 }
 
-$workflow = Get-Content -LiteralPath (Join-Path $root '.github\workflows\release.yml') -Raw
-if ($workflow -match '\-\-clobber|contents:\s*write') { throw 'The blocked release workflow still permits publication or replacement.' }
+$legacyWorkflow = Join-Path $root '.github\workflows\release.yml'
+if (Test-Path -LiteralPath $legacyWorkflow) {
+    throw 'The obsolete v0.2.2 pre-release blocking workflow still exists.'
+}
 $grayValidator = Get-Content -LiteralPath (Join-Path $root 'Validate-Gray.ps1') -Raw
 foreach ($required in @('DurationMinutes = 120', '$usable.Count -lt 200', 'cleanupVerified',
     'fleetDeploymentAllowed = $true', 'reconcileCount -ge ($preCleanupReconcile + 2)',
@@ -155,7 +171,8 @@ finally {
     cleanCandidateCanaryAccepted = (-not $manifest.sourceDirty)
     fleetRequiresGrayAuthorization = $true
     developmentScopeGuards = $true
-    releaseBlocked = $true
+    releasePublished = [bool]$status.releasePublished
+    fleetDeploymentCompleted = [bool]$status.fleetDeploymentCompleted
     authorityHasNoUia = $true
     boundedGitRunnerGuarded = $true
     pidReuseSafeDescendantSelection = $true

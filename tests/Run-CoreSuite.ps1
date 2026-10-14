@@ -59,12 +59,12 @@ $result = @{
     expectedTestCount = $tests.Count
     artifactManifestSha256 = $manifestHash
     receipts = $receipts.ToArray()
-    maintenanceAcceptance = 'ISOLATED_MAINTENANCE_CHAIN_PASSED_PRODUCTION_NOT_RUN'
-    sustainedValidation = 'NOT_RUN'
-    productionInstallation = 'NOT_RUN'
-    releasePublication = 'NOT_RUN'
+    maintenanceAcceptance = 'ISOLATED_MAINTENANCE_CHAIN_PASSED_WHEN_SUITE_PASSES'
+    sustainedValidation = 'OUTSIDE_THIS_ISOLATED_SUITE'
+    productionInstallation = 'OUTSIDE_THIS_ISOLATED_SUITE'
+    releasePublication = 'OUTSIDE_THIS_ISOLATED_SUITE'
     gitReconcileAcceptance = 'ISOLATED_BOUNDED_GIT_RECONCILE_PASSED_WHEN_SUITE_PASSES'
-    scope = 'isolated source/component/security/Git-reconcile/maintenance tests; not sustained, release or deployment acceptance'
+    scope = 'isolated source/component/security/Git-reconcile/maintenance tests; consult RELEASE_STATUS.json and the release report for current operational state'
 }
 $json = $result | ConvertTo-Json -Depth 10
 [IO.File]::WriteAllText((Join-Path $suiteDirectory 'receipt.json'), $json, [Text.UTF8Encoding]::new($false))

@@ -1,18 +1,12 @@
 # Codex Worktree Trust Bridge
 
-> **v0.2.2 development branch — not a release or accepted production installation.**
-> Core resource/lifecycle, exact-identity maintenance and bounded Git/reconcile
-> changes have passed focused isolated tests. A clean complete-suite build is the
-> next final-candidate gate. Only that byte-identical artifact may be installed
-> first on QDSPC. Local and T113 remain blocked until QDSPC completes the
-> representative two-hour gray authorization. GitHub publication remains blocked
-> until the same authorization accepts the frozen archive. See
-> [development progress](docs/v0.2.2-progress.md) and the
-> [frozen acceptance contract](docs/v0.2.2-acceptance.md), including the
-> [maintenance-chain contract](docs/v0.2.2-maintenance-acceptance.md).
-> The production `v0.2.1` tag and existing installations are not changed by this
-> development checkout. The installation instructions below describe that
-> previously published release until all remaining candidate gates are complete.
+> **Latest release: v0.2.2 (2026-10-14).** The released source is commit
+> `668c5e4c09d32267bbf91a59117e22bf3bce4771`; the published, byte-identical
+> release archive has SHA-256
+> `a373662471719eb69d5371886b1b051d47d82138c5ed71b7330e0237ba35866e`.
+> It passed the complete bounded suite, a two-hour representative canary run and
+> sequential deployment verification on three Windows hosts. See the
+> [release and deployment report](docs/v0.2.2-release-and-deployment.md).
 
 [![Windows](https://img.shields.io/badge/platform-Windows-0078D4)](https://www.microsoft.com/windows)
 [![PowerShell 7](https://img.shields.io/badge/PowerShell-7%2B-5391FE)](https://github.com/PowerShell/PowerShell)
@@ -34,13 +28,18 @@ folders, or other short-lived project roots can therefore produce many trust
 prompts, even when every path lives beneath project roots that you already
 control.
 
-The bridge combines two mechanisms in one background process and one Windows
-Scheduled Task:
+The bridge combines two mechanisms in one supervised process tree started by one
+Windows Scheduled Task:
 
 1. it maintains exact `projects.'<path>'.trust_level = "trusted"` entries in
    `%USERPROFILE%\.codex\config.toml`; and
-2. it uses Windows UI Automation to invoke the matching Codex Desktop Trust or
-   Cancel button.
+2. it uses a bounded, isolated Windows UI Automation worker to invoke the matching
+   Codex Desktop Trust or Cancel button.
+
+The launcher owns the authority runtime and its descendants through a Windows Job
+Object. The long-lived PowerShell authority process performs policy, Git and
+configuration work; a separate MTA worker contains UI Automation objects and can
+be recycled without restarting the authority or replaying an uncertain action.
 
 The bridge does **not** click fixed screen coordinates.
 
@@ -158,7 +157,7 @@ Example:
 {
   "schema": "codex-worktree-trust-bridge.config",
   "version": 1,
-  "packageVersion": "0.2.1",
+  "packageVersion": "0.2.2",
   "allowedRoots": [
     "C:\\PROJECT",
     "E:\\PROJECT"
@@ -166,6 +165,17 @@ Example:
   "uiPollIntervalMs": 750,
   "reconcileIntervalSeconds": 60,
   "discoveryDepth": 4,
+  "reconcileTimeoutSeconds": 120,
+  "discoveryDirectoryLimit": 5000,
+  "discoveryRepositoryLimit": 256,
+  "discoveryWorktreeLimit": 1024,
+  "gitCommandLimitPerReconcile": 2048,
+  "gitCommandTimeoutSeconds": 10,
+  "gitCleanupTimeoutSeconds": 5,
+  "gitMaximumStandardOutputBytes": 262144,
+  "gitMaximumStandardErrorBytes": 65536,
+  "gitJobMemoryMiB": 128,
+  "gitProcessLimit": 8,
   "trustMode": "git-only",
   "deniedDialogAction": "leave-open",
   "deniedDialogGraceSeconds": 3,
@@ -184,6 +194,11 @@ Example:
 | `uiPollIntervalMs` | How often the interactive process checks for a matching Codex trust dialog. |
 | `reconcileIntervalSeconds` | How often Git roots/worktrees and the managed trust block are reconciled. |
 | `discoveryDepth` | Maximum directory depth used while finding Git repositories under allowed roots. |
+| `reconcileTimeoutSeconds` | End-to-end deadline for one discovery and reconciliation pass. |
+| `discovery*Limit` / `gitCommandLimitPerReconcile` | Finite traversal and command budgets; a partial run never replaces the previous trust state. |
+| `gitCommandTimeoutSeconds` / `gitCleanupTimeoutSeconds` | Execution and verified cleanup deadlines for each Job-owned Git command tree. |
+| `gitMaximumStandard*Bytes` | Separate bounded stdout and stderr capture limits. |
+| `gitJobMemoryMiB` / `gitProcessLimit` | Per-command Job memory and active-process limits. |
 | `enableConfigTrust` | Enables maintenance of exact trusted entries in `config.toml`. |
 | `enableUiAutoApprove` | Enables guarded Windows UI Automation approval and cancellation. |
 | `pruneMissingManagedEntries` | Compatibility field retained for existing configurations. In v0.2.0, missing, invalid, out-of-policy, and mode-ineligible managed paths are always removed for safety. |
@@ -282,20 +297,20 @@ Important events include:
 
 ## Upgrade
 
-For a future accepted v0.2.2 release, `Install.cmd` first verifies the complete
-artifact before touching the task. It then exports and hashes the original task
+For v0.2.2 and later compatible packages, `Install.cmd` first verifies the
+complete artifact before touching the task. It then exports and hashes the original task
 and machine-local files, captures the exact launcher/runtime identity, stops only
 that process tree, performs a same-volume staged install, preserves task settings
 and local configuration, and requires verified readiness. Startup failure
 automatically attempts rollback and reports both the original failure and the
 rollback result.
 
-The final-candidate build is accepted only when the checkout is clean and the
-candidate, maintenance and Git/reconcile implementation gates are true. Canary
-installation is limited to QDSPC. Fleet installation requires a separate
-`gray-authorization.json` that identifies the exact manifest/source, records at
-least two hours and 200 usable post-warm-up samples, and proves cleanup. Isolated
-maintenance tests use unique temporary task names and paths under `.artifacts`.
+The v0.2.2 release was promoted only after a clean complete suite, exact candidate
+freeze, host-local rollback backups and a `gray-authorization.json` bound to the
+same source and manifest. Future releases should use the same fail-closed order:
+candidate verification, one-host canary, sustained observation, then sequential
+fleet rollout. Isolated maintenance tests use unique temporary task names and
+paths under `.artifacts`.
 
 An installation receipt can be rolled back with:
 
@@ -308,18 +323,19 @@ Rollback verifies the backup, refuses to overwrite a bridge configuration that
 changed after installation, restores the original task and files, and merges the
 original managed Codex block without removing unrelated later edits.
 
-## Candidate freeze and QDSPC gray validation
+## Release provenance and validation
 
-After a clean complete suite, freeze the exact candidate without rebuilding:
+Maintainers freeze an exact candidate after the clean complete suite without
+rebuilding it:
 
 ```powershell
 pwsh.exe -NoLogo -NoProfile -File .\tools\Freeze-Candidate.ps1 `
   -SuiteReceiptPath <complete-suite-receipt.json>
 ```
 
-The freeze receipt records the source commit and manifest/ZIP SHA-256. QDSPC is
-installed with `Install.ps1 -CanaryDeployment` using that frozen directory. Its
-installation receipt is then supplied to:
+The freeze receipt records the source commit and manifest/ZIP SHA-256. A designated
+canary host is installed with `Install.ps1 -CanaryDeployment` using that frozen
+directory. Its installation receipt is then supplied to:
 
 ```powershell
 pwsh.exe -NoLogo -NoProfile -File .\Validate-Gray.ps1 `
@@ -334,9 +350,11 @@ emitted only after the controlled repository is removed and two later reconciles
 prove its paths absent from bridge state and Codex configuration. Failure creates
 a non-authorizing receipt and the canary must be rolled back.
 
-Only a passing QDSPC receipt can unlock the exact frozen artifact for Local and
-then T113. `tools\Publish-FrozenCandidate.ps1` refuses existing tags/releases and
-uploads the previously frozen ZIP without rebuilding or replacing an asset.
+Only a passing canary receipt can unlock the exact frozen artifact for the
+remaining hosts. `tools\Publish-FrozenCandidate.ps1` refuses existing tags and
+releases and uploads the previously frozen ZIP without rebuilding or replacing an
+asset. For v0.2.2, the accepted identities are recorded in
+[`docs/v0.2.2-release-and-deployment.md`](docs/v0.2.2-release-and-deployment.md).
 
 ## Privacy and data handling
 
@@ -366,8 +384,7 @@ pwsh.exe -NoLogo -NoProfile -File .\Uninstall.ps1 `
 ```
 
 v0.2.2 uninstall creates and verifies the same host-local backup before removing
-anything. A mid-uninstall failure automatically attempts restoration. Production
-uninstall remains blocked for an unaccepted development installation.
+anything. A mid-uninstall failure automatically attempts restoration.
 
 ## Troubleshooting
 
@@ -423,7 +440,8 @@ See [SECURITY.md](SECURITY.md) for vulnerability-reporting guidance.
 
 ## Development and verification
 
-For this **unreleased v0.2.2 branch**, use the finite, isolated complete suite:
+For v0.2.2 development and regression verification, use the finite, isolated
+complete suite:
 
 ```powershell
 pwsh.exe -NoLogo -NoProfile -File .\Build.ps1
@@ -435,9 +453,8 @@ and keeps raw output, resource samples, artifact hashes and verified job-cleanup
 receipts under ignored `.artifacts`. The controlled UI fixtures do not modify
 the user's Codex trust configuration or click business dialogs. The maintenance
 group uses unique temporary Scheduled Tasks and verifies that the production task,
-process creation identities and hashes are unchanged. A complete-suite pass is
-not QDSPC installation, two-hour stability, fleet rollout or publication.
-See `docs/v0.2.2-progress.md` for the remaining gates and evidence scope.
+process creation identities and hashes are unchanged. Suite success is necessary
+but does not replace canary, sustained-observation or per-host deployment checks.
 
 Parse all PowerShell files:
 
@@ -471,11 +488,11 @@ pwsh.exe -NoLogo -NoProfile -File .\tests\Run-Bounded.ps1 `
 
 ## Releases
 
-Version tags use `vMAJOR.MINOR.PATCH`. This development branch's workflow refuses
-automatic publication. After QDSPC gray authorization, the explicit publication
-tool verifies tag/release absence and uploads the exact frozen archive without
-overwriting or rebuilding. Do not push a release tag to bypass the candidate,
-canary, cleanup or sustained-validation gates.
+Version tags use `vMAJOR.MINOR.PATCH`. v0.2.2 is published as an annotated tag and
+GitHub Release whose ZIP is byte-identical to the canary-tested archive. Future
+publication should continue to use the explicit publication tool only after the
+candidate, canary, cleanup and sustained-validation gates pass; it must not
+overwrite an existing tag, release or asset.
 
 See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
